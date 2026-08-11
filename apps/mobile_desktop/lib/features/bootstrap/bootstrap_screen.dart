@@ -66,11 +66,13 @@ class _BootstrapScreenState extends ConsumerState<BootstrapScreen> {
     });
 
     try {
-      final response = await ref.read(apiClientProvider).get<String>('');
+      final response = await ref.read(apiClientProvider).get<dynamic>('/tasks');
+      if (!mounted) return;
       setState(
         () => _apiResult = 'Success (${response.statusCode}): ${response.data}',
       );
     } on DioException catch (e) {
+      if (!mounted) return;
       setState(() => _apiResult = 'Failed: ${e.message}');
     } finally {
       if (mounted) setState(() => _isCallingApi = false);
