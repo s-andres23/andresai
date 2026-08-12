@@ -1,0 +1,77 @@
+import 'dart:async';
+import 'dart:convert';
+import 'dart:typed_data';
+
+import 'package:dio/dio.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:mobile_desktop/features/tasks/task.dart';
+import 'package:mobile_desktop/features/tasks/tasks_repository.dart';
+
+/// Returns a fixed JSON body for every request, without performing any real
+/// network I/O.
+class _StubAdapter implements HttpClientAdapter {
+  _StubAdapter(this.body);
+
+  final String body;
+  RequestOptions? lastOptions;
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    lastOptions = options;
+    return ResponseBody.fromString(
+      body,
+      200,
+      headers: {
+        Headers.contentTypeHeader: [Headers.jsonContentType],
+      },
+    );
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+void main() {
+  test('fetchTasks calls GET /tasks and parses the response', () async {
+    final adapter = _StubAdapter(
+      jsonEncode([
+        {
+          'id': 'task-1',
+          'userId': 'user-1',
+          'title': 'Buy milk',
+          'description': null,
+          'status': 'open',
+          'priority': 'normal',
+          'dueDate': null,
+          'dueTime': null,
+          'createdAt': '2026-08-10T12:00:00.000Z',
+          'updatedAt': '2026-08-10T12:00:00.000Z',
+          'completedAt': null,
+        },
+      ]),
+    );
+    final dio = Dio()..httpClientAdapter = adapter;
+    final repository = TasksRepository(dio);
+
+    final tasks = await repository.fetchTasks();
+
+    expect(adapter.lastOptions!.path, '/tasks');
+    expect(adapter.lastOptions!.method, 'GET');
+    expect(tasks, hasLength(1));
+    expect(tasks.single.title, 'Buy milk');
+    expect(tasks.single.status, TaskStatus.open);
+  });
+
+  test('fetchTasks returns an empty list for an empty response', () async {
+    final dio = Dio()..httpClientAdapter = _StubAdapter(jsonEncode([]));
+    final repository = TasksRepository(dio);
+
+    final tasks = await repository.fetchTasks();
+
+    expect(tasks, isEmpty);
+  });
+}
