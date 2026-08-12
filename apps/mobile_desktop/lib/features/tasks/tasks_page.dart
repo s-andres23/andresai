@@ -38,6 +38,7 @@ class TasksPage extends ConsumerWidget {
         onPressed: () => showModalBottomSheet<void>(
           context: context,
           isScrollControlled: true,
+          useSafeArea: true,
           builder: (_) => const _CreateTaskSheet(),
         ),
         tooltip: 'Add task',
@@ -177,75 +178,104 @@ class _CreateTaskSheetState extends ConsumerState<_CreateTaskSheet> {
 
   @override
   Widget build(BuildContext context) {
-    return Padding(
-      padding: EdgeInsets.only(
-        left: 16,
-        right: 16,
-        top: 16,
-        bottom: MediaQuery.of(context).viewInsets.bottom + 16,
-      ),
-      child: Form(
-        key: _formKey,
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
-            Text('New task', style: Theme.of(context).textTheme.titleLarge),
-            const SizedBox(height: 16),
-            TextFormField(
-              controller: _titleController,
-              decoration: const InputDecoration(labelText: 'Title'),
-              textInputAction: TextInputAction.next,
-              autofocus: true,
-              enabled: !_isSubmitting,
-              validator: (value) => CreateTaskInput.validateTitle(value ?? ''),
+    // `useSafeArea` on showModalBottomSheet only avoids top/left/right system
+    // intrusions, so the bottom safe area (e.g. the iOS home indicator) is
+    // still ours to handle here, alongside the software keyboard inset.
+    final bottomInset = MediaQuery.viewInsetsOf(context).bottom;
+
+    return SafeArea(
+      top: false,
+      child: Center(
+        child: ConstrainedBox(
+          // Caps the form's width so it doesn't stretch edge-to-edge in
+          // large desktop windows, without affecting narrower mobile/windowed
+          // layouts, which stay full-width.
+          constraints: const BoxConstraints(maxWidth: 480),
+          child: SingleChildScrollView(
+            padding: EdgeInsets.only(
+              left: 16,
+              right: 16,
+              top: 16,
+              bottom: bottomInset + 16,
             ),
-            const SizedBox(height: 12),
-            TextFormField(
-              controller: _descriptionController,
-              decoration: const InputDecoration(
-                labelText: 'Description (optional)',
+            child: Form(
+              key: _formKey,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  Text(
+                    'New task',
+                    style: Theme.of(context).textTheme.titleLarge,
+                  ),
+                  const SizedBox(height: 16),
+                  TextFormField(
+                    controller: _titleController,
+                    decoration: const InputDecoration(labelText: 'Title'),
+                    textInputAction: TextInputAction.next,
+                    autofocus: true,
+                    enabled: !_isSubmitting,
+                    validator: (value) =>
+                        CreateTaskInput.validateTitle(value ?? ''),
+                  ),
+                  const SizedBox(height: 12),
+                  TextFormField(
+                    controller: _descriptionController,
+                    decoration: const InputDecoration(
+                      labelText: 'Description (optional)',
+                    ),
+                    minLines: 1,
+                    maxLines: 3,
+                    enabled: !_isSubmitting,
+                    validator: (value) =>
+                        CreateTaskInput.validateDescription(value ?? ''),
+                  ),
+                  const SizedBox(height: 12),
+                  SegmentedButton<TaskPriority>(
+                    segments: const [
+                      ButtonSegment(
+                        value: TaskPriority.low,
+                        label: Text('Low'),
+                      ),
+                      ButtonSegment(
+                        value: TaskPriority.normal,
+                        label: Text('Normal'),
+                      ),
+                      ButtonSegment(
+                        value: TaskPriority.high,
+                        label: Text('High'),
+                      ),
+                    ],
+                    selected: {_priority},
+                    onSelectionChanged: _isSubmitting
+                        ? null
+                        : (selection) =>
+                              setState(() => _priority = selection.first),
+                  ),
+                  if (_submitError != null) ...[
+                    const SizedBox(height: 12),
+                    Text(
+                      _submitError!,
+                      style: TextStyle(
+                        color: Theme.of(context).colorScheme.error,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 16),
+                  FilledButton(
+                    onPressed: _isSubmitting ? null : _submit,
+                    child: _isSubmitting
+                        ? const SizedBox(
+                            height: 20,
+                            width: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Text('Create task'),
+                  ),
+                ],
               ),
-              minLines: 1,
-              maxLines: 3,
-              enabled: !_isSubmitting,
-              validator: (value) =>
-                  CreateTaskInput.validateDescription(value ?? ''),
             ),
-            const SizedBox(height: 12),
-            SegmentedButton<TaskPriority>(
-              segments: const [
-                ButtonSegment(value: TaskPriority.low, label: Text('Low')),
-                ButtonSegment(
-                  value: TaskPriority.normal,
-                  label: Text('Normal'),
-                ),
-                ButtonSegment(value: TaskPriority.high, label: Text('High')),
-              ],
-              selected: {_priority},
-              onSelectionChanged: _isSubmitting
-                  ? null
-                  : (selection) => setState(() => _priority = selection.first),
-            ),
-            if (_submitError != null) ...[
-              const SizedBox(height: 12),
-              Text(
-                _submitError!,
-                style: TextStyle(color: Theme.of(context).colorScheme.error),
-              ),
-            ],
-            const SizedBox(height: 16),
-            FilledButton(
-              onPressed: _isSubmitting ? null : _submit,
-              child: _isSubmitting
-                  ? const SizedBox(
-                      height: 20,
-                      width: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Text('Create task'),
-            ),
-          ],
+          ),
         ),
       ),
     );
