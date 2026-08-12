@@ -1,6 +1,9 @@
+import 'dart:async';
+
 import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mobile_desktop/features/tasks/create_task_input.dart';
 import 'package:mobile_desktop/features/tasks/task.dart';
 import 'package:mobile_desktop/features/tasks/tasks_controller.dart';
 import 'package:mobile_desktop/features/tasks/tasks_repository.dart';
@@ -21,6 +24,22 @@ final _task = Task(
   completedAt: null,
 );
 
+final _createdTask = Task(
+  id: 'task-2',
+  userId: 'user-1',
+  title: 'Write report',
+  description: null,
+  status: TaskStatus.open,
+  priority: TaskPriority.high,
+  projectId: null,
+  goalId: null,
+  dueDate: null,
+  dueTime: null,
+  createdAt: DateTime.utc(2026, 8, 12),
+  updatedAt: DateTime.utc(2026, 8, 12),
+  completedAt: null,
+);
+
 class _FakeTasksRepository extends TasksRepository {
   _FakeTasksRepository(this._tasks) : super(Dio());
 
@@ -37,6 +56,66 @@ class _ThrowingTasksRepository extends TasksRepository {
   Future<List<Task>> fetchTasks() async {
     throw Exception('network error');
   }
+}
+
+/// A repository that fetches successfully but whose `createTask` succeeds,
+/// returning [taskToCreate] and recording every call it receives.
+class _CreatingTasksRepository extends TasksRepository {
+  _CreatingTasksRepository(this._tasks, this.taskToCreate) : super(Dio());
+
+  final List<Task> _tasks;
+  final Task taskToCreate;
+  int createTaskCallCount = 0;
+  CreateTaskInput? lastInput;
+
+  @override
+  Future<List<Task>> fetchTasks() async => _tasks;
+
+  @override
+  Future<Task> createTask(CreateTaskInput input) async {
+    createTaskCallCount++;
+    lastInput = input;
+    return taskToCreate;
+  }
+}
+
+/// A repository that fetches successfully but whose `createTask` always
+/// fails.
+class _FailingCreateTasksRepository extends TasksRepository {
+  _FailingCreateTasksRepository(this._tasks) : super(Dio());
+
+  final List<Task> _tasks;
+
+  @override
+  Future<List<Task>> fetchTasks() async => _tasks;
+
+  @override
+  Future<Task> createTask(CreateTaskInput input) async {
+    throw Exception('create failed');
+  }
+}
+
+/// A repository whose `createTask` doesn't resolve until [complete] is
+/// called, so tests can assert on behavior while a create is in flight.
+class _DelayedCreateTasksRepository extends TasksRepository {
+  _DelayedCreateTasksRepository(this._tasks, this.taskToCreate) : super(Dio());
+
+  final List<Task> _tasks;
+  final Task taskToCreate;
+  final _completer = Completer<void>();
+  int createTaskCallCount = 0;
+
+  @override
+  Future<List<Task>> fetchTasks() async => _tasks;
+
+  @override
+  Future<Task> createTask(CreateTaskInput input) async {
+    createTaskCallCount++;
+    await _completer.future;
+    return taskToCreate;
+  }
+
+  void complete() => _completer.complete();
 }
 
 void main() {
@@ -114,4 +193,80 @@ void main() {
 
     expect(container.exists(tasksControllerProvider), isFalse);
   });
+
+  test('createTask prepends the created task to the loaded list', () async {
+    final repository = _CreatingTasksRepository([_task], _createdTask);
+    final container = ProviderContainer(
+      overrides: [tasksRepositoryProvider.overrideWithValue(repository)],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(tasksControllerProvider.future);
+    const input = CreateTaskInput(title: 'Write report');
+    await container.read(tasksControllerProvider.notifier).createTask(input);
+
+    expect(repository.createTaskCallCount, 1);
+    expect(repository.lastInput, input);
+    expect(container.read(tasksControllerProvider).value, [
+      _createdTask,
+      _task,
+    ]);
+  });
+
+  test(
+    'createTask surfaces errors to the caller without wiping the loaded list',
+    () async {
+      final container = ProviderContainer(
+        overrides: [
+          tasksRepositoryProvider.overrideWithValue(
+            _FailingCreateTasksRepository([_task]),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(tasksControllerProvider.future);
+
+      await expectLater(
+        container
+            .read(tasksControllerProvider.notifier)
+            .createTask(const CreateTaskInput(title: 'Write report')),
+        throwsException,
+      );
+
+      expect(
+        container.read(tasksControllerProvider),
+        isA<AsyncData<Object?>>(),
+      );
+      expect(container.read(tasksControllerProvider).value, [_task]);
+    },
+  );
+
+  test(
+    'createTask ignores a second call while one is already in flight',
+    () async {
+      final repository = _DelayedCreateTasksRepository([_task], _createdTask);
+      final container = ProviderContainer(
+        overrides: [tasksRepositoryProvider.overrideWithValue(repository)],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(tasksControllerProvider.future);
+
+      final notifier = container.read(tasksControllerProvider.notifier);
+      const input = CreateTaskInput(title: 'Write report');
+      final first = notifier.createTask(input);
+      final second = notifier.createTask(input);
+
+      repository.complete();
+      await first;
+      await second;
+
+      expect(repository.createTaskCallCount, 1);
+      expect(container.read(tasksControllerProvider).value, [
+        _createdTask,
+        _task,
+      ]);
+    },
+  );
 }

@@ -2,10 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/auth/auth_providers.dart';
+import 'create_task_input.dart';
 import 'task.dart';
 import 'tasks_controller.dart';
 
-/// Displays the authenticated user's tasks. Read-only for now.
+/// Displays the authenticated user's tasks, and lets the user create new
+/// ones.
 class TasksPage extends ConsumerWidget {
   const TasksPage({super.key});
 
@@ -32,6 +34,15 @@ class TasksPage extends ConsumerWidget {
         ),
         _ => const Center(child: CircularProgressIndicator()),
       },
+      floatingActionButton: FloatingActionButton(
+        onPressed: () => showModalBottomSheet<void>(
+          context: context,
+          isScrollControlled: true,
+          builder: (_) => const _CreateTaskSheet(),
+        ),
+        tooltip: 'Add task',
+        child: const Icon(Icons.add),
+      ),
     );
   }
 }
@@ -106,6 +117,134 @@ class _TasksErrorView extends StatelessWidget {
             Text(message, textAlign: TextAlign.center),
             const SizedBox(height: 16),
             FilledButton(onPressed: onRetry, child: const Text('Retry')),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// A form for creating a task, shown as a modal bottom sheet.
+class _CreateTaskSheet extends ConsumerStatefulWidget {
+  const _CreateTaskSheet();
+
+  @override
+  ConsumerState<_CreateTaskSheet> createState() => _CreateTaskSheetState();
+}
+
+class _CreateTaskSheetState extends ConsumerState<_CreateTaskSheet> {
+  final _formKey = GlobalKey<FormState>();
+  final _titleController = TextEditingController();
+  final _descriptionController = TextEditingController();
+  TaskPriority _priority = TaskPriority.normal;
+  bool _isSubmitting = false;
+  String? _submitError;
+
+  @override
+  void dispose() {
+    _titleController.dispose();
+    _descriptionController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _submit() async {
+    if (_isSubmitting || !_formKey.currentState!.validate()) return;
+
+    setState(() {
+      _isSubmitting = true;
+      _submitError = null;
+    });
+
+    final description = _descriptionController.text.trim();
+    final input = CreateTaskInput(
+      title: _titleController.text.trim(),
+      description: description.isEmpty ? null : description,
+      priority: _priority,
+    );
+
+    try {
+      await ref.read(tasksControllerProvider.notifier).createTask(input);
+      if (mounted) Navigator.of(context).pop();
+    } catch (error) {
+      if (mounted) {
+        setState(() {
+          _isSubmitting = false;
+          _submitError = error.toString();
+        });
+      }
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: EdgeInsets.only(
+        left: 16,
+        right: 16,
+        top: 16,
+        bottom: MediaQuery.of(context).viewInsets.bottom + 16,
+      ),
+      child: Form(
+        key: _formKey,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            Text('New task', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 16),
+            TextFormField(
+              controller: _titleController,
+              decoration: const InputDecoration(labelText: 'Title'),
+              textInputAction: TextInputAction.next,
+              autofocus: true,
+              enabled: !_isSubmitting,
+              validator: (value) => CreateTaskInput.validateTitle(value ?? ''),
+            ),
+            const SizedBox(height: 12),
+            TextFormField(
+              controller: _descriptionController,
+              decoration: const InputDecoration(
+                labelText: 'Description (optional)',
+              ),
+              minLines: 1,
+              maxLines: 3,
+              enabled: !_isSubmitting,
+              validator: (value) =>
+                  CreateTaskInput.validateDescription(value ?? ''),
+            ),
+            const SizedBox(height: 12),
+            SegmentedButton<TaskPriority>(
+              segments: const [
+                ButtonSegment(value: TaskPriority.low, label: Text('Low')),
+                ButtonSegment(
+                  value: TaskPriority.normal,
+                  label: Text('Normal'),
+                ),
+                ButtonSegment(value: TaskPriority.high, label: Text('High')),
+              ],
+              selected: {_priority},
+              onSelectionChanged: _isSubmitting
+                  ? null
+                  : (selection) => setState(() => _priority = selection.first),
+            ),
+            if (_submitError != null) ...[
+              const SizedBox(height: 12),
+              Text(
+                _submitError!,
+                style: TextStyle(color: Theme.of(context).colorScheme.error),
+              ),
+            ],
+            const SizedBox(height: 16),
+            FilledButton(
+              onPressed: _isSubmitting ? null : _submit,
+              child: _isSubmitting
+                  ? const SizedBox(
+                      height: 20,
+                      width: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Text('Create task'),
+            ),
           ],
         ),
       ),

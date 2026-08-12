@@ -2,9 +2,10 @@ import 'package:dio/dio.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/network/api_client.dart';
+import 'create_task_input.dart';
 import 'task.dart';
 
-/// Fetches the authenticated user's tasks from the NestJS backend.
+/// Fetches and creates the authenticated user's tasks via the NestJS backend.
 ///
 /// Uses the shared [apiClientProvider] Dio client; never talks to Supabase's
 /// `tasks` table directly.
@@ -19,6 +20,14 @@ class TasksRepository {
     return data
         .map((task) => Task.fromJson(task as Map<String, dynamic>))
         .toList();
+  }
+
+  Future<Task> createTask(CreateTaskInput input) async {
+    final response = await _dio.post<Map<String, dynamic>>(
+      '/tasks',
+      data: input.toJson(),
+    );
+    return Task.fromJson(response.data!);
   }
 }
 

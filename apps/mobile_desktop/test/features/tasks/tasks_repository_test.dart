@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mobile_desktop/features/tasks/create_task_input.dart';
 import 'package:mobile_desktop/features/tasks/task.dart';
 import 'package:mobile_desktop/features/tasks/tasks_repository.dart';
 
@@ -74,4 +75,72 @@ void main() {
 
     expect(tasks, isEmpty);
   });
+
+  test(
+    'createTask posts the full payload and parses the created task',
+    () async {
+      final adapter = _StubAdapter(
+        jsonEncode({
+          'id': 'task-2',
+          'userId': 'user-1',
+          'title': 'Write report',
+          'description': 'Quarterly summary',
+          'status': 'open',
+          'priority': 'high',
+          'dueDate': null,
+          'dueTime': null,
+          'createdAt': '2026-08-12T12:00:00.000Z',
+          'updatedAt': '2026-08-12T12:00:00.000Z',
+          'completedAt': null,
+        }),
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TasksRepository(dio);
+
+      final task = await repository.createTask(
+        const CreateTaskInput(
+          title: 'Write report',
+          description: 'Quarterly summary',
+          priority: TaskPriority.high,
+        ),
+      );
+
+      expect(adapter.lastOptions!.path, '/tasks');
+      expect(adapter.lastOptions!.method, 'POST');
+      expect(adapter.lastOptions!.data, {
+        'title': 'Write report',
+        'description': 'Quarterly summary',
+        'priority': 'high',
+      });
+      expect(task.id, 'task-2');
+      expect(task.priority, TaskPriority.high);
+    },
+  );
+
+  test(
+    'createTask omits description and priority from the payload when absent',
+    () async {
+      final adapter = _StubAdapter(
+        jsonEncode({
+          'id': 'task-3',
+          'userId': 'user-1',
+          'title': 'Buy milk',
+          'description': null,
+          'status': 'open',
+          'priority': 'normal',
+          'dueDate': null,
+          'dueTime': null,
+          'createdAt': '2026-08-12T12:00:00.000Z',
+          'updatedAt': '2026-08-12T12:00:00.000Z',
+          'completedAt': null,
+        }),
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TasksRepository(dio);
+
+      await repository.createTask(const CreateTaskInput(title: 'Buy milk'));
+
+      expect(adapter.lastOptions!.data, {'title': 'Buy milk'});
+    },
+  );
 }
