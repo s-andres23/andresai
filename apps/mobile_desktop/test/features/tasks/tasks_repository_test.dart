@@ -143,4 +143,64 @@ void main() {
       expect(adapter.lastOptions!.data, {'title': 'Buy milk'});
     },
   );
+
+  test(
+    'completeTask posts to /tasks/:id/complete and parses the updated task',
+    () async {
+      final adapter = _StubAdapter(
+        jsonEncode({
+          'id': 'task-1',
+          'userId': 'user-1',
+          'title': 'Buy milk',
+          'description': null,
+          'status': 'completed',
+          'priority': 'normal',
+          'dueDate': null,
+          'dueTime': null,
+          'createdAt': '2026-08-10T12:00:00.000Z',
+          'updatedAt': '2026-08-13T12:00:00.000Z',
+          'completedAt': '2026-08-13T12:00:00.000Z',
+        }),
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TasksRepository(dio);
+
+      final task = await repository.completeTask('task-1');
+
+      expect(adapter.lastOptions!.path, '/tasks/task-1/complete');
+      expect(adapter.lastOptions!.method, 'POST');
+      expect(task.status, TaskStatus.completed);
+      expect(task.completedAt, isNotNull);
+    },
+  );
+
+  test(
+    'reopenTask posts to /tasks/:id/reopen and parses the updated task',
+    () async {
+      final adapter = _StubAdapter(
+        jsonEncode({
+          'id': 'task-1',
+          'userId': 'user-1',
+          'title': 'Buy milk',
+          'description': null,
+          'status': 'open',
+          'priority': 'normal',
+          'dueDate': null,
+          'dueTime': null,
+          'createdAt': '2026-08-10T12:00:00.000Z',
+          'updatedAt': '2026-08-13T12:00:00.000Z',
+          'completedAt': null,
+        }),
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TasksRepository(dio);
+
+      final task = await repository.reopenTask('task-1');
+
+      expect(adapter.lastOptions!.path, '/tasks/task-1/reopen');
+      expect(adapter.lastOptions!.method, 'POST');
+      expect(task.status, TaskStatus.open);
+      expect(task.completedAt, isNull);
+    },
+  );
 }

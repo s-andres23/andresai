@@ -40,6 +40,38 @@ final _createdTask = Task(
   completedAt: null,
 );
 
+final _completedTask = Task(
+  id: 'task-1',
+  userId: 'user-1',
+  title: 'Buy milk',
+  description: null,
+  status: TaskStatus.completed,
+  priority: TaskPriority.normal,
+  projectId: null,
+  goalId: null,
+  dueDate: null,
+  dueTime: null,
+  createdAt: DateTime.utc(2026, 8, 10),
+  updatedAt: DateTime.utc(2026, 8, 13),
+  completedAt: DateTime.utc(2026, 8, 13),
+);
+
+final _reopenedTask = Task(
+  id: 'task-1',
+  userId: 'user-1',
+  title: 'Buy milk',
+  description: null,
+  status: TaskStatus.open,
+  priority: TaskPriority.normal,
+  projectId: null,
+  goalId: null,
+  dueDate: null,
+  dueTime: null,
+  createdAt: DateTime.utc(2026, 8, 10),
+  updatedAt: DateTime.utc(2026, 8, 13),
+  completedAt: null,
+);
+
 class _FakeTasksRepository extends TasksRepository {
   _FakeTasksRepository(this._tasks) : super(Dio());
 
@@ -116,6 +148,83 @@ class _DelayedCreateTasksRepository extends TasksRepository {
   }
 
   void complete() => _completer.complete();
+}
+
+/// A repository that fetches successfully, and whose `completeTask`/
+/// `reopenTask` succeed, returning [taskToReturn] and recording every call.
+class _StatusUpdatingTasksRepository extends TasksRepository {
+  _StatusUpdatingTasksRepository(this._tasks, this.taskToReturn) : super(Dio());
+
+  final List<Task> _tasks;
+  final Task taskToReturn;
+  int completeCallCount = 0;
+  int reopenCallCount = 0;
+  String? lastTaskId;
+
+  @override
+  Future<List<Task>> fetchTasks() async => _tasks;
+
+  @override
+  Future<Task> completeTask(String taskId) async {
+    completeCallCount++;
+    lastTaskId = taskId;
+    return taskToReturn;
+  }
+
+  @override
+  Future<Task> reopenTask(String taskId) async {
+    reopenCallCount++;
+    lastTaskId = taskId;
+    return taskToReturn;
+  }
+}
+
+/// A repository that fetches successfully but whose `completeTask`/
+/// `reopenTask` always fail.
+class _FailingStatusUpdateTasksRepository extends TasksRepository {
+  _FailingStatusUpdateTasksRepository(this._tasks) : super(Dio());
+
+  final List<Task> _tasks;
+
+  @override
+  Future<List<Task>> fetchTasks() async => _tasks;
+
+  @override
+  Future<Task> completeTask(String taskId) async {
+    throw Exception('complete failed');
+  }
+
+  @override
+  Future<Task> reopenTask(String taskId) async {
+    throw Exception('reopen failed');
+  }
+}
+
+/// A repository whose `completeTask`/`reopenTask` don't resolve until
+/// [complete] is called for the matching task ID, so tests can assert on
+/// behavior while an update is in flight.
+class _DelayedStatusUpdateTasksRepository extends TasksRepository {
+  _DelayedStatusUpdateTasksRepository(this._tasks, this._resultsByTaskId)
+    : super(Dio());
+
+  final List<Task> _tasks;
+  final Map<String, Task> _resultsByTaskId;
+  final Map<String, Completer<void>> _completers = {};
+  final Map<String, int> completeCallCounts = {};
+
+  @override
+  Future<List<Task>> fetchTasks() async => _tasks;
+
+  @override
+  Future<Task> completeTask(String taskId) async {
+    completeCallCounts.update(taskId, (count) => count + 1, ifAbsent: () => 1);
+    await (_completers[taskId] ??= Completer<void>()).future;
+    return _resultsByTaskId[taskId]!;
+  }
+
+  void complete(String taskId) {
+    (_completers[taskId] ??= Completer<void>()).complete();
+  }
 }
 
 void main() {
@@ -269,4 +378,177 @@ void main() {
       ]);
     },
   );
+
+  test('completeTask replaces the matching task in place', () async {
+    final repository = _StatusUpdatingTasksRepository([
+      _createdTask,
+      _task,
+    ], _completedTask);
+    final container = ProviderContainer(
+      overrides: [tasksRepositoryProvider.overrideWithValue(repository)],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(tasksControllerProvider.future);
+    await container
+        .read(tasksControllerProvider.notifier)
+        .completeTask(_task.id);
+
+    expect(repository.completeCallCount, 1);
+    expect(repository.lastTaskId, _task.id);
+    expect(container.read(tasksControllerProvider).value, [
+      _createdTask,
+      _completedTask,
+    ]);
+  });
+
+  test('reopenTask replaces the matching task in place', () async {
+    final repository = _StatusUpdatingTasksRepository([
+      _completedTask,
+    ], _reopenedTask);
+    final container = ProviderContainer(
+      overrides: [tasksRepositoryProvider.overrideWithValue(repository)],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(tasksControllerProvider.future);
+    await container
+        .read(tasksControllerProvider.notifier)
+        .reopenTask(_completedTask.id);
+
+    expect(repository.reopenCallCount, 1);
+    expect(repository.lastTaskId, _completedTask.id);
+    expect(container.read(tasksControllerProvider).value, [_reopenedTask]);
+  });
+
+  test('completeTask surfaces errors to the caller without wiping the loaded '
+      'list', () async {
+    final container = ProviderContainer(
+      overrides: [
+        tasksRepositoryProvider.overrideWithValue(
+          _FailingStatusUpdateTasksRepository([_task]),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(tasksControllerProvider.future);
+
+    await expectLater(
+      container.read(tasksControllerProvider.notifier).completeTask(_task.id),
+      throwsException,
+    );
+
+    expect(container.read(tasksControllerProvider), isA<AsyncData<Object?>>());
+    expect(container.read(tasksControllerProvider).value, [_task]);
+  });
+
+  test(
+    'reopenTask surfaces errors to the caller without wiping the loaded list',
+    () async {
+      final container = ProviderContainer(
+        overrides: [
+          tasksRepositoryProvider.overrideWithValue(
+            _FailingStatusUpdateTasksRepository([_completedTask]),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(tasksControllerProvider.future);
+
+      await expectLater(
+        container
+            .read(tasksControllerProvider.notifier)
+            .reopenTask(_completedTask.id),
+        throwsException,
+      );
+
+      expect(container.read(tasksControllerProvider).value, [_completedTask]);
+    },
+  );
+
+  test('completeTask ignores a second call for the same task while one is '
+      'already in flight', () async {
+    final repository = _DelayedStatusUpdateTasksRepository(
+      [_task],
+      {_task.id: _completedTask},
+    );
+    final container = ProviderContainer(
+      overrides: [tasksRepositoryProvider.overrideWithValue(repository)],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(tasksControllerProvider.future);
+
+    final notifier = container.read(tasksControllerProvider.notifier);
+    final first = notifier.completeTask(_task.id);
+    final second = notifier.completeTask(_task.id);
+
+    repository.complete(_task.id);
+    await first;
+    await second;
+
+    expect(repository.completeCallCounts[_task.id], 1);
+    expect(container.read(tasksControllerProvider).value, [_completedTask]);
+  });
+
+  test('completeTask allows concurrent updates for different tasks', () async {
+    final otherTask = Task(
+      id: 'task-5',
+      userId: 'user-1',
+      title: 'Water plants',
+      description: null,
+      status: TaskStatus.open,
+      priority: TaskPriority.low,
+      projectId: null,
+      goalId: null,
+      dueDate: null,
+      dueTime: null,
+      createdAt: DateTime.utc(2026, 8, 9),
+      updatedAt: DateTime.utc(2026, 8, 9),
+      completedAt: null,
+    );
+    final otherCompletedTask = Task(
+      id: otherTask.id,
+      userId: otherTask.userId,
+      title: otherTask.title,
+      description: otherTask.description,
+      status: TaskStatus.completed,
+      priority: otherTask.priority,
+      projectId: null,
+      goalId: null,
+      dueDate: null,
+      dueTime: null,
+      createdAt: otherTask.createdAt,
+      updatedAt: DateTime.utc(2026, 8, 13),
+      completedAt: DateTime.utc(2026, 8, 13),
+    );
+    final repository = _DelayedStatusUpdateTasksRepository(
+      [_task, otherTask],
+      {_task.id: _completedTask, otherTask.id: otherCompletedTask},
+    );
+    final container = ProviderContainer(
+      overrides: [tasksRepositoryProvider.overrideWithValue(repository)],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(tasksControllerProvider.future);
+
+    final notifier = container.read(tasksControllerProvider.notifier);
+    final first = notifier.completeTask(_task.id);
+    final second = notifier.completeTask(otherTask.id);
+
+    repository.complete(_task.id);
+    repository.complete(otherTask.id);
+    await first;
+    await second;
+
+    expect(repository.completeCallCounts[_task.id], 1);
+    expect(repository.completeCallCounts[otherTask.id], 1);
+    expect(container.read(tasksControllerProvider).value, [
+      _completedTask,
+      otherCompletedTask,
+    ]);
+  });
 }

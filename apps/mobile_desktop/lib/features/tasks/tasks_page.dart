@@ -68,21 +68,68 @@ class _TasksList extends StatelessWidget {
   }
 }
 
-class _TaskTile extends StatelessWidget {
+class _TaskTile extends ConsumerStatefulWidget {
   const _TaskTile({required this.task});
 
   final Task task;
 
   @override
+  ConsumerState<_TaskTile> createState() => _TaskTileState();
+}
+
+class _TaskTileState extends ConsumerState<_TaskTile> {
+  bool _isUpdating = false;
+
+  Future<void> _toggleStatus() async {
+    if (_isUpdating) return;
+    setState(() => _isUpdating = true);
+
+    final isCompleted = widget.task.status == TaskStatus.completed;
+    final notifier = ref.read(tasksControllerProvider.notifier);
+
+    try {
+      if (isCompleted) {
+        await notifier.reopenTask(widget.task.id);
+      } else {
+        await notifier.completeTask(widget.task.id);
+      }
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to update task: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isUpdating = false);
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final task = widget.task;
     final isCompleted = task.status == TaskStatus.completed;
 
     return Card(
       child: ListTile(
-        leading: Icon(
-          isCompleted ? Icons.check_circle : Icons.radio_button_unchecked,
-          color: isCompleted ? Colors.green : null,
-        ),
+        leading: _isUpdating
+            ? const Padding(
+                padding: EdgeInsets.all(4),
+                child: SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              )
+            : IconButton(
+                icon: Icon(
+                  isCompleted
+                      ? Icons.check_circle
+                      : Icons.radio_button_unchecked,
+                  color: isCompleted ? Colors.green : null,
+                ),
+                tooltip: isCompleted ? 'Reopen task' : 'Mark as complete',
+                onPressed: _toggleStatus,
+              ),
         title: Text(
           task.title,
           style: isCompleted

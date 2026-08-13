@@ -29,6 +29,20 @@ class TasksRepository {
     );
     return Task.fromJson(response.data!);
   }
+
+  Future<Task> completeTask(String taskId) async {
+    final response = await _dio.post<Map<String, dynamic>>(
+      '/tasks/$taskId/complete',
+    );
+    return Task.fromJson(response.data!);
+  }
+
+  Future<Task> reopenTask(String taskId) async {
+    final response = await _dio.post<Map<String, dynamic>>(
+      '/tasks/$taskId/reopen',
+    );
+    return Task.fromJson(response.data!);
+  }
 }
 
 final tasksRepositoryProvider = Provider<TasksRepository>((ref) {

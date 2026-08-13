@@ -10,6 +10,7 @@ import 'tasks_repository.dart';
 /// state without manual bookkeeping.
 class TasksController extends AsyncNotifier<List<Task>> {
   bool _isCreating = false;
+  final Set<String> _pendingTaskIds = {};
 
   @override
   Future<List<Task>> build() {
@@ -37,6 +38,39 @@ class TasksController extends AsyncNotifier<List<Task>> {
       state = AsyncValue.data([created, ...?state.value]);
     } finally {
       _isCreating = false;
+    }
+  }
+
+  /// Marks [taskId] as completed and replaces it in place in the loaded
+  /// list.
+  Future<void> completeTask(String taskId) =>
+      _updateTaskStatus(taskId, complete: true);
+
+  /// Reopens [taskId] and replaces it in place in the loaded list.
+  Future<void> reopenTask(String taskId) =>
+      _updateTaskStatus(taskId, complete: false);
+
+  /// Guards against concurrent complete/reopen calls for the same task with
+  /// [_pendingTaskIds]. On failure the error is rethrown to the caller (so
+  /// the UI can show it) rather than written to [state], which would
+  /// replace the loaded task list with an error view.
+  Future<void> _updateTaskStatus(
+    String taskId, {
+    required bool complete,
+  }) async {
+    if (_pendingTaskIds.contains(taskId)) return;
+    _pendingTaskIds.add(taskId);
+    try {
+      final repository = ref.read(tasksRepositoryProvider);
+      final updated = complete
+          ? await repository.completeTask(taskId)
+          : await repository.reopenTask(taskId);
+      state = AsyncValue.data([
+        for (final task in state.value ?? const [])
+          if (task.id == taskId) updated else task,
+      ]);
+    } finally {
+      _pendingTaskIds.remove(taskId);
     }
   }
 }
