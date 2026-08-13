@@ -5,6 +5,7 @@ import '../../core/auth/auth_providers.dart';
 import 'create_task_input.dart';
 import 'task.dart';
 import 'tasks_controller.dart';
+import 'update_task_input.dart';
 
 /// Displays the authenticated user's tasks, and lets the user create new
 /// ones.
@@ -63,19 +64,38 @@ class _TasksList extends StatelessWidget {
       padding: const EdgeInsets.all(16),
       itemCount: tasks.length,
       separatorBuilder: (_, _) => const SizedBox(height: 8),
-      itemBuilder: (context, index) => _TaskTile(task: tasks[index]),
+      itemBuilder: (context, index) {
+        final task = tasks[index];
+        // A stable per-task key so Flutter matches each row's Element (and
+        // its local _isUpdating state) to the same task across insertions,
+        // deletions, and reorders, instead of reusing whatever State object
+        // previously occupied that list index.
+        return _TaskTile(key: ValueKey(task.id), task: task);
+      },
+      // Without this, ListView.separated only compares the old vs. new
+      // widget at the *same* index: a keyed row whose task shifted to a
+      // different index is discarded and rebuilt from scratch (losing its
+      // _isUpdating state) rather than relocated. This lets Flutter find a
+      // keyed row wherever it now lives and move its Element instead.
+      findItemIndexCallback: (key) {
+        final taskId = (key as ValueKey<String>).value;
+        final index = tasks.indexWhere((task) => task.id == taskId);
+        return index == -1 ? null : index;
+      },
     );
   }
 }
 
 class _TaskTile extends ConsumerStatefulWidget {
-  const _TaskTile({required this.task});
+  const _TaskTile({super.key, required this.task});
 
   final Task task;
 
   @override
   ConsumerState<_TaskTile> createState() => _TaskTileState();
 }
+
+enum _TaskAction { edit, delete }
 
 class _TaskTileState extends ConsumerState<_TaskTile> {
   bool _isUpdating = false;
@@ -101,6 +121,53 @@ class _TaskTileState extends ConsumerState<_TaskTile> {
       }
     } finally {
       if (mounted) setState(() => _isUpdating = false);
+    }
+  }
+
+  void _openEditSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (_) => _EditTaskSheet(task: widget.task),
+    );
+  }
+
+  Future<void> _confirmDelete() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete task?'),
+        content: Text('Delete "${widget.task.title}"? This can\'t be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _isUpdating = true);
+    try {
+      await ref
+          .read(tasksControllerProvider.notifier)
+          .deleteTask(widget.task.id);
+      // On success the task disappears from the list entirely once `state`
+      // updates, so there's no tile left to reset `_isUpdating` on.
+    } catch (error) {
+      if (mounted) {
+        setState(() => _isUpdating = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to delete task: $error')),
+        );
+      }
     }
   }
 
@@ -137,7 +204,27 @@ class _TaskTileState extends ConsumerState<_TaskTile> {
               : null,
         ),
         subtitle: task.description == null ? null : Text(task.description!),
-        trailing: Text(task.priority.name),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(task.priority.name),
+            PopupMenuButton<_TaskAction>(
+              tooltip: 'Task actions',
+              enabled: !_isUpdating,
+              onSelected: (action) {
+                if (action == _TaskAction.edit) {
+                  _openEditSheet();
+                } else {
+                  _confirmDelete();
+                }
+              },
+              itemBuilder: (context) => const [
+                PopupMenuItem(value: _TaskAction.edit, child: Text('Edit')),
+                PopupMenuItem(value: _TaskAction.delete, child: Text('Delete')),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -172,19 +259,100 @@ class _TasksErrorView extends StatelessWidget {
   }
 }
 
-/// A form for creating a task, shown as a modal bottom sheet.
-class _CreateTaskSheet extends ConsumerStatefulWidget {
+/// Creates a task, shown as a modal bottom sheet.
+class _CreateTaskSheet extends ConsumerWidget {
   const _CreateTaskSheet();
 
   @override
-  ConsumerState<_CreateTaskSheet> createState() => _CreateTaskSheetState();
+  Widget build(BuildContext context, WidgetRef ref) {
+    return _TaskFormSheet(
+      heading: 'New task',
+      submitLabel: 'Create task',
+      initialTitle: '',
+      initialDescription: null,
+      initialPriority: TaskPriority.normal,
+      onSubmit: (title, description, priority) => ref
+          .read(tasksControllerProvider.notifier)
+          .createTask(
+            CreateTaskInput(
+              title: title,
+              description: description,
+              priority: priority,
+            ),
+          ),
+    );
+  }
 }
 
-class _CreateTaskSheetState extends ConsumerState<_CreateTaskSheet> {
+/// Edits an existing task, shown as a modal bottom sheet prefilled with its
+/// current values.
+class _EditTaskSheet extends ConsumerWidget {
+  const _EditTaskSheet({required this.task});
+
+  final Task task;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    return _TaskFormSheet(
+      heading: 'Edit task',
+      submitLabel: 'Save changes',
+      initialTitle: task.title,
+      initialDescription: task.description,
+      initialPriority: task.priority,
+      onSubmit: (title, description, priority) => ref
+          .read(tasksControllerProvider.notifier)
+          .updateTask(
+            task.id,
+            UpdateTaskInput(
+              title: title,
+              description: description,
+              priority: priority,
+            ),
+          ),
+    );
+  }
+}
+
+/// A responsive title/description/priority form, shared by [_CreateTaskSheet]
+/// and [_EditTaskSheet], shown as the content of a modal bottom sheet.
+class _TaskFormSheet extends ConsumerStatefulWidget {
+  const _TaskFormSheet({
+    required this.heading,
+    required this.submitLabel,
+    required this.initialTitle,
+    required this.initialDescription,
+    required this.initialPriority,
+    required this.onSubmit,
+  });
+
+  final String heading;
+  final String submitLabel;
+  final String initialTitle;
+  final String? initialDescription;
+  final TaskPriority initialPriority;
+
+  /// Submits the form's current values. Throws on failure, which the sheet
+  /// surfaces inline without closing.
+  final Future<void> Function(
+    String title,
+    String? description,
+    TaskPriority priority,
+  )
+  onSubmit;
+
+  @override
+  ConsumerState<_TaskFormSheet> createState() => _TaskFormSheetState();
+}
+
+class _TaskFormSheetState extends ConsumerState<_TaskFormSheet> {
   final _formKey = GlobalKey<FormState>();
-  final _titleController = TextEditingController();
-  final _descriptionController = TextEditingController();
-  TaskPriority _priority = TaskPriority.normal;
+  late final _titleController = TextEditingController(
+    text: widget.initialTitle,
+  );
+  late final _descriptionController = TextEditingController(
+    text: widget.initialDescription ?? '',
+  );
+  late TaskPriority _priority = widget.initialPriority;
   bool _isSubmitting = false;
   String? _submitError;
 
@@ -204,14 +372,13 @@ class _CreateTaskSheetState extends ConsumerState<_CreateTaskSheet> {
     });
 
     final description = _descriptionController.text.trim();
-    final input = CreateTaskInput(
-      title: _titleController.text.trim(),
-      description: description.isEmpty ? null : description,
-      priority: _priority,
-    );
 
     try {
-      await ref.read(tasksControllerProvider.notifier).createTask(input);
+      await widget.onSubmit(
+        _titleController.text.trim(),
+        description.isEmpty ? null : description,
+        _priority,
+      );
       if (mounted) Navigator.of(context).pop();
     } catch (error) {
       if (mounted) {
@@ -252,7 +419,7 @@ class _CreateTaskSheetState extends ConsumerState<_CreateTaskSheet> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Text(
-                    'New task',
+                    widget.heading,
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
                   const SizedBox(height: 16),
@@ -317,7 +484,7 @@ class _CreateTaskSheetState extends ConsumerState<_CreateTaskSheet> {
                             width: 20,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : const Text('Create task'),
+                        : Text(widget.submitLabel),
                   ),
                 ],
               ),
