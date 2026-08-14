@@ -2,13 +2,15 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'calendar_event.dart';
 import 'calendar_repository.dart';
+import 'create_calendar_event_input.dart';
 
 /// Loads and holds the authenticated user's calendar events.
 ///
 /// Exposes loading/data/error via [AsyncValue] so the UI reacts to each
-/// state without manual bookkeeping. Read-only for V0.1: there are no
-/// mutation methods yet.
+/// state without manual bookkeeping.
 class CalendarController extends AsyncNotifier<List<CalendarEvent>> {
+  bool _isCreating = false;
+
   @override
   Future<List<CalendarEvent>> build() {
     return ref.watch(calendarRepositoryProvider).fetchEvents();
@@ -19,6 +21,31 @@ class CalendarController extends AsyncNotifier<List<CalendarEvent>> {
     state = await AsyncValue.guard(
       () => ref.read(calendarRepositoryProvider).fetchEvents(),
     );
+  }
+
+  /// Creates an event and inserts it into the current list, keeping the
+  /// list ordered by `startAt` ascending.
+  ///
+  /// Guards against duplicate submission with [_isCreating]. On failure the
+  /// error is rethrown to the caller (so the UI can show it) rather than
+  /// written to [state], which would replace the loaded event list with an
+  /// error view.
+  Future<void> createEvent(CreateCalendarEventInput input) async {
+    if (_isCreating) return;
+    _isCreating = true;
+    try {
+      final created = await ref
+          .read(calendarRepositoryProvider)
+          .createEvent(input);
+      final current = List<CalendarEvent>.from(state.value ?? const []);
+      final insertIndex = current.indexWhere(
+        (event) => event.startAt.isAfter(created.startAt),
+      );
+      current.insert(insertIndex == -1 ? current.length : insertIndex, created);
+      state = AsyncValue.data(current);
+    } finally {
+      _isCreating = false;
+    }
   }
 }
 

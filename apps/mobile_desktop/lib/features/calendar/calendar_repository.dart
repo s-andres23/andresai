@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/network/api_client.dart';
 import 'calendar_event.dart';
+import 'create_calendar_event_input.dart';
 
 /// Fetches the authenticated user's calendar events via the NestJS backend.
 ///
@@ -33,6 +34,14 @@ class CalendarRepository {
     return data
         .map((event) => CalendarEvent.fromJson(event as Map<String, dynamic>))
         .toList();
+  }
+
+  Future<CalendarEvent> createEvent(CreateCalendarEventInput input) async {
+    final response = await _dio.post<Map<String, dynamic>>(
+      '/calendar-events',
+      data: input.toJson(),
+    );
+    return CalendarEvent.fromJson(response.data!);
   }
 }
 
