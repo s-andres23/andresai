@@ -49,3 +49,5 @@ apps/mobile_desktop/macos/.symlinks/
 # Supabase
 supabase/.temp/
 
+
+.env.flutter.local
