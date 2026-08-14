@@ -3,7 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../core/auth/auth_providers.dart';
 import '../features/bootstrap/bootstrap_screen.dart';
-import '../features/tasks/tasks_page.dart';
+import 'home_shell.dart';
 
 class App extends ConsumerWidget {
   const App({super.key});
@@ -18,8 +18,8 @@ class App extends ConsumerWidget {
         colorScheme: ColorScheme.fromSeed(seedColor: Colors.deepPurple),
       ),
       // Signed out: the temporary bootstrap sign-in screen. Signed in: the
-      // real Tasks feature.
-      home: session == null ? const BootstrapScreen() : const TasksPage(),
+      // temporary Tasks/Calendar navigation shell.
+      home: session == null ? const BootstrapScreen() : const HomeShell(),
     );
   }
 }
