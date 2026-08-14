@@ -7,5 +7,9 @@ import { SupabaseAuthGuard } from '../../common/auth/supabase-auth.guard';
 @Module({
   controllers: [TasksController],
   providers: [TasksService, TasksRepository, SupabaseAuthGuard],
+  // Exported so other modules (e.g. Reminders) can reuse TasksService's
+  // existing ownership-checked findOne() rather than duplicating repository
+  // access.
+  exports: [TasksService],
 })
 export class TasksModule {}

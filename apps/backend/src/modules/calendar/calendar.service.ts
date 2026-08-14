@@ -8,10 +8,14 @@ import { CreateCalendarEventDto } from './dto/create-calendar-event.dto';
 import { QueryCalendarEventsDto } from './dto/query-calendar-events.dto';
 import { UpdateCalendarEventDto } from './dto/update-calendar-event.dto';
 import { CalendarEvent } from './interfaces/calendar-event.interface';
+import { ReminderSyncService } from '../reminders/reminder-sync.service';
 
 @Injectable()
 export class CalendarService {
-  constructor(private readonly calendarRepository: CalendarRepository) {}
+  constructor(
+    private readonly calendarRepository: CalendarRepository,
+    private readonly reminderSyncService: ReminderSyncService,
+  ) {}
 
   async findAll(
     userId: string,
@@ -53,7 +57,24 @@ export class CalendarService {
     const effectiveEndAt = dto.endAt ?? existing.endAt;
     this.validateInterval(effectiveStartAt, effectiveEndAt);
 
-    return this.calendarRepository.update(userId, id, dto);
+    const updated = await this.calendarRepository.update(userId, id, dto);
+
+    // Only sync once the update has actually persisted, and only when
+    // startAt effectively changed. Comparing the persisted instants (not
+    // raw strings) avoids false positives from timestamp formatting
+    // differences between reads.
+    const startAtChanged =
+      new Date(updated.startAt).getTime() !==
+      new Date(existing.startAt).getTime();
+    if (startAtChanged) {
+      await this.reminderSyncService.syncCalendarEventReminders(
+        userId,
+        id,
+        updated.startAt,
+      );
+    }
+
+    return updated;
   }
 
   async remove(userId: string, id: string): Promise<void> {

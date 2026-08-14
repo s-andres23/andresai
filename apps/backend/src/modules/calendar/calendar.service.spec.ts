@@ -2,10 +2,12 @@ import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { CalendarService } from './calendar.service';
 import { CalendarRepository } from './calendar.repository';
 import { CalendarEvent } from './interfaces/calendar-event.interface';
+import { ReminderSyncService } from '../reminders/reminder-sync.service';
 
 describe('CalendarService', () => {
   let service: CalendarService;
   let repository: jest.Mocked<CalendarRepository>;
+  let reminderSyncService: jest.Mocked<ReminderSyncService>;
 
   const userId = 'user-1';
   const baseEvent: CalendarEvent = {
@@ -30,7 +32,11 @@ describe('CalendarService', () => {
       delete: jest.fn(),
     } as unknown as jest.Mocked<CalendarRepository>;
 
-    service = new CalendarService(repository);
+    reminderSyncService = {
+      syncCalendarEventReminders: jest.fn().mockResolvedValue(undefined),
+    } as unknown as jest.Mocked<ReminderSyncService>;
+
+    service = new CalendarService(repository, reminderSyncService);
   });
 
   it('returns all events for a user', async () => {
@@ -177,5 +183,73 @@ describe('CalendarService', () => {
       NotFoundException,
     );
     expect(repository.delete).not.toHaveBeenCalled();
+  });
+
+  describe('reminder sync on update', () => {
+    it('triggers reminder synchronization when startAt changes', async () => {
+      repository.findById.mockResolvedValue(baseEvent);
+      const updated = { ...baseEvent, startAt: '2026-08-20T08:30:00.000Z' };
+      repository.update.mockResolvedValue(updated);
+
+      await service.update(userId, baseEvent.id, {
+        startAt: '2026-08-20T08:30:00.000Z',
+      });
+
+      expect(
+        reminderSyncService.syncCalendarEventReminders,
+      ).toHaveBeenCalledWith(userId, baseEvent.id, '2026-08-20T08:30:00.000Z');
+    });
+
+    it('uses the final persisted startAt for the sync call, not the raw DTO value', async () => {
+      repository.findById.mockResolvedValue(baseEvent);
+      // Simulate the DB/PostgREST returning a differently-formatted (but
+      // equivalent) representation of the same requested instant.
+      const persistedStartAt = '2026-08-20T08:30:00+00:00';
+      repository.update.mockResolvedValue({
+        ...baseEvent,
+        startAt: persistedStartAt,
+      });
+
+      await service.update(userId, baseEvent.id, {
+        startAt: '2026-08-20T08:30:00.000Z',
+      });
+
+      expect(
+        reminderSyncService.syncCalendarEventReminders,
+      ).toHaveBeenCalledWith(userId, baseEvent.id, persistedStartAt);
+    });
+
+    it('does not synchronize reminders when only title/description change', async () => {
+      repository.findById.mockResolvedValue(baseEvent);
+      repository.update.mockResolvedValue({
+        ...baseEvent,
+        title: 'Renamed sync',
+        description: 'New agenda',
+      });
+
+      await service.update(userId, baseEvent.id, {
+        title: 'Renamed sync',
+        description: 'New agenda',
+      });
+
+      expect(
+        reminderSyncService.syncCalendarEventReminders,
+      ).not.toHaveBeenCalled();
+    });
+
+    it('does not synchronize reminders when the Calendar update fails', async () => {
+      repository.findById.mockResolvedValue(baseEvent);
+      repository.update.mockRejectedValue(new Error('db error'));
+
+      await expect(
+        service.update(userId, baseEvent.id, {
+          startAt: '2026-08-20T08:30:00.000Z',
+        }),
+      ).rejects.toThrow('db error');
+
+      expect(
+        reminderSyncService.syncCalendarEventReminders,
+      ).not.toHaveBeenCalled();
+    });
   });
 });
