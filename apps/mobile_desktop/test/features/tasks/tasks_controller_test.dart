@@ -7,6 +7,7 @@ import 'package:mobile_desktop/features/tasks/create_task_input.dart';
 import 'package:mobile_desktop/features/tasks/task.dart';
 import 'package:mobile_desktop/features/tasks/tasks_controller.dart';
 import 'package:mobile_desktop/features/tasks/tasks_repository.dart';
+import 'package:mobile_desktop/features/tasks/update_task_input.dart';
 
 final _task = Task(
   id: 'task-1',
@@ -225,6 +226,119 @@ class _DelayedStatusUpdateTasksRepository extends TasksRepository {
   void complete(String taskId) {
     (_completers[taskId] ??= Completer<void>()).complete();
   }
+}
+
+/// A repository that fetches successfully, and whose `updateTask` succeeds,
+/// returning [taskToReturn] and recording every call.
+class _UpdatingTasksRepository extends TasksRepository {
+  _UpdatingTasksRepository(this._tasks, this.taskToReturn) : super(Dio());
+
+  final List<Task> _tasks;
+  final Task taskToReturn;
+  int updateCallCount = 0;
+  String? lastTaskId;
+  UpdateTaskInput? lastInput;
+
+  @override
+  Future<List<Task>> fetchTasks() async => _tasks;
+
+  @override
+  Future<Task> updateTask(String taskId, UpdateTaskInput input) async {
+    updateCallCount++;
+    lastTaskId = taskId;
+    lastInput = input;
+    return taskToReturn;
+  }
+}
+
+/// A repository that fetches successfully but whose `updateTask` always
+/// fails.
+class _FailingUpdateTasksRepository extends TasksRepository {
+  _FailingUpdateTasksRepository(this._tasks) : super(Dio());
+
+  final List<Task> _tasks;
+
+  @override
+  Future<List<Task>> fetchTasks() async => _tasks;
+
+  @override
+  Future<Task> updateTask(String taskId, UpdateTaskInput input) async {
+    throw Exception('update failed');
+  }
+}
+
+/// A repository that fetches successfully, and whose `deleteTask` succeeds,
+/// recording every call.
+class _DeletingTasksRepository extends TasksRepository {
+  _DeletingTasksRepository(this._tasks) : super(Dio());
+
+  final List<Task> _tasks;
+  int deleteCallCount = 0;
+  String? lastTaskId;
+
+  @override
+  Future<List<Task>> fetchTasks() async => _tasks;
+
+  @override
+  Future<void> deleteTask(String taskId) async {
+    deleteCallCount++;
+    lastTaskId = taskId;
+  }
+}
+
+/// A repository that fetches successfully but whose `deleteTask` always
+/// fails.
+class _FailingDeleteTasksRepository extends TasksRepository {
+  _FailingDeleteTasksRepository(this._tasks) : super(Dio());
+
+  final List<Task> _tasks;
+
+  @override
+  Future<List<Task>> fetchTasks() async => _tasks;
+
+  @override
+  Future<void> deleteTask(String taskId) async {
+    throw Exception('delete failed');
+  }
+}
+
+/// A repository whose `completeTask` and `updateTask` don't resolve until
+/// [completeStatusUpdate]/[completeEdit] is called, so a test can verify
+/// that different mutation types for the same task are mutually exclusive.
+class _DelayedMixedMutationTasksRepository extends TasksRepository {
+  _DelayedMixedMutationTasksRepository(
+    this._tasks,
+    this._completedResult,
+    this._updatedResult,
+  ) : super(Dio());
+
+  final List<Task> _tasks;
+  final Task _completedResult;
+  final Task _updatedResult;
+  final _statusCompleter = Completer<void>();
+  final _editCompleter = Completer<void>();
+  int completeCallCount = 0;
+  int updateCallCount = 0;
+
+  @override
+  Future<List<Task>> fetchTasks() async => _tasks;
+
+  @override
+  Future<Task> completeTask(String taskId) async {
+    completeCallCount++;
+    await _statusCompleter.future;
+    return _completedResult;
+  }
+
+  @override
+  Future<Task> updateTask(String taskId, UpdateTaskInput input) async {
+    updateCallCount++;
+    await _editCompleter.future;
+    return _updatedResult;
+  }
+
+  void completeStatusUpdate() => _statusCompleter.complete();
+  void completeEdit() => _editCompleter.complete();
 }
 
 void main() {
@@ -551,4 +665,167 @@ void main() {
       otherCompletedTask,
     ]);
   });
+
+  test('updateTask replaces the matching task in place', () async {
+    final updatedTask = Task(
+      id: _task.id,
+      userId: _task.userId,
+      title: 'Buy oat milk',
+      description: 'From the corner store',
+      status: _task.status,
+      priority: TaskPriority.high,
+      projectId: null,
+      goalId: null,
+      dueDate: null,
+      dueTime: null,
+      createdAt: _task.createdAt,
+      updatedAt: DateTime.utc(2026, 8, 13),
+      completedAt: null,
+    );
+    final repository = _UpdatingTasksRepository([
+      _createdTask,
+      _task,
+    ], updatedTask);
+    final container = ProviderContainer(
+      overrides: [tasksRepositoryProvider.overrideWithValue(repository)],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(tasksControllerProvider.future);
+    const input = UpdateTaskInput(
+      title: 'Buy oat milk',
+      description: 'From the corner store',
+      priority: TaskPriority.high,
+    );
+    await container
+        .read(tasksControllerProvider.notifier)
+        .updateTask(_task.id, input);
+
+    expect(repository.updateCallCount, 1);
+    expect(repository.lastTaskId, _task.id);
+    expect(repository.lastInput, input);
+    expect(container.read(tasksControllerProvider).value, [
+      _createdTask,
+      updatedTask,
+    ]);
+  });
+
+  test('updateTask surfaces errors to the caller without wiping the loaded '
+      'list', () async {
+    final container = ProviderContainer(
+      overrides: [
+        tasksRepositoryProvider.overrideWithValue(
+          _FailingUpdateTasksRepository([_task]),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(tasksControllerProvider.future);
+
+    await expectLater(
+      container
+          .read(tasksControllerProvider.notifier)
+          .updateTask(
+            _task.id,
+            const UpdateTaskInput(
+              title: 'Buy oat milk',
+              priority: TaskPriority.normal,
+            ),
+          ),
+      throwsException,
+    );
+
+    expect(container.read(tasksControllerProvider), isA<AsyncData<Object?>>());
+    expect(container.read(tasksControllerProvider).value, [_task]);
+  });
+
+  test('deleteTask removes the task from the loaded list', () async {
+    final repository = _DeletingTasksRepository([_createdTask, _task]);
+    final container = ProviderContainer(
+      overrides: [tasksRepositoryProvider.overrideWithValue(repository)],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(tasksControllerProvider.future);
+    await container.read(tasksControllerProvider.notifier).deleteTask(_task.id);
+
+    expect(repository.deleteCallCount, 1);
+    expect(repository.lastTaskId, _task.id);
+    expect(container.read(tasksControllerProvider).value, [_createdTask]);
+  });
+
+  test('deleteTask surfaces errors to the caller without wiping the loaded '
+      'list', () async {
+    final container = ProviderContainer(
+      overrides: [
+        tasksRepositoryProvider.overrideWithValue(
+          _FailingDeleteTasksRepository([_task]),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(tasksControllerProvider.future);
+
+    await expectLater(
+      container.read(tasksControllerProvider.notifier).deleteTask(_task.id),
+      throwsException,
+    );
+
+    expect(container.read(tasksControllerProvider).value, [_task]);
+  });
+
+  test(
+    'a pending complete blocks a concurrent edit for the same task',
+    () async {
+      final updatedTask = Task(
+        id: _task.id,
+        userId: _task.userId,
+        title: 'Buy oat milk',
+        description: _task.description,
+        status: _task.status,
+        priority: _task.priority,
+        projectId: null,
+        goalId: null,
+        dueDate: null,
+        dueTime: null,
+        createdAt: _task.createdAt,
+        updatedAt: DateTime.utc(2026, 8, 13),
+        completedAt: null,
+      );
+      final repository = _DelayedMixedMutationTasksRepository(
+        [_task],
+        _completedTask,
+        updatedTask,
+      );
+      final container = ProviderContainer(
+        overrides: [tasksRepositoryProvider.overrideWithValue(repository)],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(tasksControllerProvider.future);
+
+      final notifier = container.read(tasksControllerProvider.notifier);
+      // Started first, so it wins the guard: the concurrent edit below
+      // should be silently ignored rather than racing it.
+      final completeFuture = notifier.completeTask(_task.id);
+      final editFuture = notifier.updateTask(
+        _task.id,
+        const UpdateTaskInput(
+          title: 'Buy oat milk',
+          priority: TaskPriority.normal,
+        ),
+      );
+
+      repository.completeStatusUpdate();
+      repository.completeEdit();
+      await completeFuture;
+      await editFuture;
+
+      expect(repository.completeCallCount, 1);
+      expect(repository.updateCallCount, 0);
+      expect(container.read(tasksControllerProvider).value, [_completedTask]);
+    },
+  );
 }

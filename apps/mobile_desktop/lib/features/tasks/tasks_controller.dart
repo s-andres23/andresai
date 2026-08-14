@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'create_task_input.dart';
 import 'task.dart';
 import 'tasks_repository.dart';
+import 'update_task_input.dart';
 
 /// Loads and holds the authenticated user's tasks.
 ///
@@ -43,32 +44,58 @@ class TasksController extends AsyncNotifier<List<Task>> {
 
   /// Marks [taskId] as completed and replaces it in place in the loaded
   /// list.
-  Future<void> completeTask(String taskId) =>
-      _updateTaskStatus(taskId, complete: true);
+  Future<void> completeTask(String taskId) => _runExclusive(taskId, () async {
+    final updated = await ref
+        .read(tasksRepositoryProvider)
+        .completeTask(taskId);
+    _replaceTask(updated);
+  });
 
   /// Reopens [taskId] and replaces it in place in the loaded list.
-  Future<void> reopenTask(String taskId) =>
-      _updateTaskStatus(taskId, complete: false);
+  Future<void> reopenTask(String taskId) => _runExclusive(taskId, () async {
+    final updated = await ref.read(tasksRepositoryProvider).reopenTask(taskId);
+    _replaceTask(updated);
+  });
 
-  /// Guards against concurrent complete/reopen calls for the same task with
+  /// Updates [taskId]'s title/description/priority and replaces it in place
+  /// in the loaded list.
+  Future<void> updateTask(String taskId, UpdateTaskInput input) =>
+      _runExclusive(taskId, () async {
+        final updated = await ref
+            .read(tasksRepositoryProvider)
+            .updateTask(taskId, input);
+        _replaceTask(updated);
+      });
+
+  /// Deletes [taskId] and removes it from the loaded list.
+  Future<void> deleteTask(String taskId) => _runExclusive(taskId, () async {
+    await ref.read(tasksRepositoryProvider).deleteTask(taskId);
+    state = AsyncValue.data([
+      for (final task in state.value ?? const [])
+        if (task.id != taskId) task,
+    ]);
+  });
+
+  void _replaceTask(Task updated) {
+    state = AsyncValue.data([
+      for (final task in state.value ?? const [])
+        if (task.id == updated.id) updated else task,
+    ]);
+  }
+
+  /// Runs [action] for [taskId], guarding against concurrent
+  /// complete/reopen/edit/delete calls on the same task with
   /// [_pendingTaskIds]. On failure the error is rethrown to the caller (so
   /// the UI can show it) rather than written to [state], which would
   /// replace the loaded task list with an error view.
-  Future<void> _updateTaskStatus(
-    String taskId, {
-    required bool complete,
-  }) async {
+  Future<void> _runExclusive(
+    String taskId,
+    Future<void> Function() action,
+  ) async {
     if (_pendingTaskIds.contains(taskId)) return;
     _pendingTaskIds.add(taskId);
     try {
-      final repository = ref.read(tasksRepositoryProvider);
-      final updated = complete
-          ? await repository.completeTask(taskId)
-          : await repository.reopenTask(taskId);
-      state = AsyncValue.data([
-        for (final task in state.value ?? const [])
-          if (task.id == taskId) updated else task,
-      ]);
+      await action();
     } finally {
       _pendingTaskIds.remove(taskId);
     }

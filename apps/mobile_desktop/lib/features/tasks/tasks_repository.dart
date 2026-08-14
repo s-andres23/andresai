@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/network/api_client.dart';
 import 'create_task_input.dart';
 import 'task.dart';
+import 'update_task_input.dart';
 
 /// Fetches and creates the authenticated user's tasks via the NestJS backend.
 ///
@@ -42,6 +43,20 @@ class TasksRepository {
       '/tasks/$taskId/reopen',
     );
     return Task.fromJson(response.data!);
+  }
+
+  Future<Task> updateTask(String taskId, UpdateTaskInput input) async {
+    final response = await _dio.patch<Map<String, dynamic>>(
+      '/tasks/$taskId',
+      data: input.toJson(),
+    );
+    return Task.fromJson(response.data!);
+  }
+
+  /// The backend responds `204 No Content` on success, so there's no body
+  /// to parse.
+  Future<void> deleteTask(String taskId) async {
+    await _dio.delete<void>('/tasks/$taskId');
   }
 }
 

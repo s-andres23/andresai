@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_desktop/features/tasks/create_task_input.dart';
 import 'package:mobile_desktop/features/tasks/task.dart';
 import 'package:mobile_desktop/features/tasks/tasks_repository.dart';
+import 'package:mobile_desktop/features/tasks/update_task_input.dart';
 
 /// Returns a fixed JSON body for every request, without performing any real
 /// network I/O.
@@ -30,6 +31,25 @@ class _StubAdapter implements HttpClientAdapter {
         Headers.contentTypeHeader: [Headers.jsonContentType],
       },
     );
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
+/// Returns an empty `204 No Content` response for every request, matching
+/// what the backend's `DELETE /tasks/:id` endpoint responds with.
+class _NoContentAdapter implements HttpClientAdapter {
+  RequestOptions? lastOptions;
+
+  @override
+  Future<ResponseBody> fetch(
+    RequestOptions options,
+    Stream<Uint8List>? requestStream,
+    Future<void>? cancelFuture,
+  ) async {
+    lastOptions = options;
+    return ResponseBody.fromString('', 204);
   }
 
   @override
@@ -203,4 +223,90 @@ void main() {
       expect(task.completedAt, isNull);
     },
   );
+
+  test('updateTask patches /tasks/:id with the full payload and parses the '
+      'response', () async {
+    final adapter = _StubAdapter(
+      jsonEncode({
+        'id': 'task-1',
+        'userId': 'user-1',
+        'title': 'Buy oat milk',
+        'description': 'From the corner store',
+        'status': 'open',
+        'priority': 'high',
+        'dueDate': null,
+        'dueTime': null,
+        'createdAt': '2026-08-10T12:00:00.000Z',
+        'updatedAt': '2026-08-13T12:00:00.000Z',
+        'completedAt': null,
+      }),
+    );
+    final dio = Dio()..httpClientAdapter = adapter;
+    final repository = TasksRepository(dio);
+
+    final task = await repository.updateTask(
+      'task-1',
+      const UpdateTaskInput(
+        title: 'Buy oat milk',
+        description: 'From the corner store',
+        priority: TaskPriority.high,
+      ),
+    );
+
+    expect(adapter.lastOptions!.path, '/tasks/task-1');
+    expect(adapter.lastOptions!.method, 'PATCH');
+    expect(adapter.lastOptions!.data, {
+      'title': 'Buy oat milk',
+      'description': 'From the corner store',
+      'priority': 'high',
+    });
+    expect(task.title, 'Buy oat milk');
+    expect(task.description, 'From the corner store');
+    expect(task.priority, TaskPriority.high);
+  });
+
+  test(
+    'updateTask sends an explicit null to clear an existing description',
+    () async {
+      final adapter = _StubAdapter(
+        jsonEncode({
+          'id': 'task-1',
+          'userId': 'user-1',
+          'title': 'Buy milk',
+          'description': null,
+          'status': 'open',
+          'priority': 'normal',
+          'dueDate': null,
+          'dueTime': null,
+          'createdAt': '2026-08-10T12:00:00.000Z',
+          'updatedAt': '2026-08-13T12:00:00.000Z',
+          'completedAt': null,
+        }),
+      );
+      final dio = Dio()..httpClientAdapter = adapter;
+      final repository = TasksRepository(dio);
+
+      await repository.updateTask(
+        'task-1',
+        const UpdateTaskInput(title: 'Buy milk', priority: TaskPriority.normal),
+      );
+
+      expect(adapter.lastOptions!.data, {
+        'title': 'Buy milk',
+        'description': null,
+        'priority': 'normal',
+      });
+    },
+  );
+
+  test('deleteTask sends DELETE /tasks/:id', () async {
+    final adapter = _NoContentAdapter();
+    final dio = Dio()..httpClientAdapter = adapter;
+    final repository = TasksRepository(dio);
+
+    await repository.deleteTask('task-1');
+
+    expect(adapter.lastOptions!.path, '/tasks/task-1');
+    expect(adapter.lastOptions!.method, 'DELETE');
+  });
 }
