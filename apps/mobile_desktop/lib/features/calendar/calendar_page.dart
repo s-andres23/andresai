@@ -6,6 +6,7 @@ import 'calendar_controller.dart';
 import 'calendar_date_format.dart';
 import 'calendar_event.dart';
 import 'create_calendar_event_input.dart';
+import 'update_calendar_event_input.dart';
 
 /// Displays the authenticated user's calendar events, ordered by start time.
 ///
@@ -69,19 +70,93 @@ class _CalendarEventsList extends StatelessWidget {
       padding: const EdgeInsets.all(16),
       itemCount: events.length,
       separatorBuilder: (_, _) => const SizedBox(height: 8),
-      itemBuilder: (context, index) =>
-          _EventTile(key: ValueKey(events[index].id), event: events[index]),
+      itemBuilder: (context, index) {
+        final event = events[index];
+        // A stable per-event key so Flutter matches each row's Element (and
+        // its local _isUpdating state) to the same event across insertions,
+        // deletions, and reorders, instead of reusing whatever State object
+        // previously occupied that list index.
+        return _EventTile(key: ValueKey(event.id), event: event);
+      },
+      // Without this, ListView.separated only compares the old vs. new
+      // widget at the *same* index: a keyed row whose event shifted to a
+      // different index (e.g. after a delete, or an edit that changed its
+      // sorted position) is discarded and rebuilt from scratch (losing its
+      // _isUpdating state) rather than relocated. This lets Flutter find a
+      // keyed row wherever it now lives and move its Element instead.
+      findItemIndexCallback: (key) {
+        final eventId = (key as ValueKey<String>).value;
+        final index = events.indexWhere((event) => event.id == eventId);
+        return index == -1 ? null : index;
+      },
     );
   }
 }
 
-class _EventTile extends StatelessWidget {
+enum _EventAction { edit, delete }
+
+class _EventTile extends ConsumerStatefulWidget {
   const _EventTile({super.key, required this.event});
 
   final CalendarEvent event;
 
   @override
+  ConsumerState<_EventTile> createState() => _EventTileState();
+}
+
+class _EventTileState extends ConsumerState<_EventTile> {
+  bool _isUpdating = false;
+
+  void _openEditSheet() {
+    showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (_) => _EditEventSheet(event: widget.event),
+    );
+  }
+
+  Future<void> _confirmDelete() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Delete event?'),
+        content: Text('Delete "${widget.event.title}"? This can\'t be undone.'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Delete'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed != true || !mounted) return;
+
+    setState(() => _isUpdating = true);
+    try {
+      await ref
+          .read(calendarControllerProvider.notifier)
+          .deleteEvent(widget.event.id);
+      // On success the event disappears from the list entirely once `state`
+      // updates, so there's no tile left to reset `_isUpdating` on.
+    } catch (error) {
+      if (mounted) {
+        setState(() => _isUpdating = false);
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to delete event: $error')),
+        );
+      }
+    }
+  }
+
+  @override
   Widget build(BuildContext context) {
+    final event = widget.event;
     final date = formatCalendarDate(event.startAt);
     final timeRange = event.allDay
         ? 'All day'
@@ -90,7 +165,16 @@ class _EventTile extends StatelessWidget {
 
     return Card(
       child: ListTile(
-        leading: const Icon(Icons.event),
+        leading: _isUpdating
+            ? const Padding(
+                padding: EdgeInsets.all(4),
+                child: SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                ),
+              )
+            : const Icon(Icons.event),
         title: Text(event.title),
         subtitle: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
@@ -107,6 +191,21 @@ class _EventTile extends StatelessWidget {
                   Flexible(child: Text(location)),
                 ],
               ),
+          ],
+        ),
+        trailing: PopupMenuButton<_EventAction>(
+          tooltip: 'Event actions',
+          enabled: !_isUpdating,
+          onSelected: (action) {
+            if (action == _EventAction.edit) {
+              _openEditSheet();
+            } else {
+              _confirmDelete();
+            }
+          },
+          itemBuilder: (context) => const [
+            PopupMenuItem(value: _EventAction.edit, child: Text('Edit')),
+            PopupMenuItem(value: _EventAction.delete, child: Text('Delete')),
           ],
         ),
       ),
@@ -162,26 +261,140 @@ DateTime computeEndAfterStartChange({
 }
 
 /// Creates a calendar event, shown as a responsive modal bottom sheet.
+class _CreateEventSheet extends ConsumerWidget {
+  const _CreateEventSheet();
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final now = DateTime.now();
+    return _EventFormSheet(
+      heading: 'New event',
+      submitLabel: 'Create event',
+      initialTitle: '',
+      initialDescription: null,
+      initialStartAt: now,
+      initialEndAt: now.add(const Duration(hours: 1)),
+      initialAllDay: false,
+      initialLocation: null,
+      onSubmit: (title, description, startAt, endAt, allDay, location) => ref
+          .read(calendarControllerProvider.notifier)
+          .createEvent(
+            CreateCalendarEventInput(
+              title: title,
+              description: description,
+              startAt: startAt,
+              endAt: endAt,
+              allDay: allDay,
+              location: location,
+            ),
+          ),
+    );
+  }
+}
+
+/// Edits an existing calendar event, shown as a modal bottom sheet prefilled
+/// with its current values.
+class _EditEventSheet extends ConsumerWidget {
+  const _EditEventSheet({required this.event});
+
+  final CalendarEvent event;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    // The backend stores an all-day event's end as an *exclusive* midnight
+    // (the day after the last selected day), but the form's end picker
+    // shows an *inclusive* last day -- undo that offset when prefilling, or
+    // saving without touching the end field would push it out by a day.
+    final initialEndAt = event.allDay
+        ? event.endAt.subtract(const Duration(days: 1))
+        : event.endAt;
+
+    return _EventFormSheet(
+      heading: 'Edit event',
+      submitLabel: 'Save changes',
+      initialTitle: event.title,
+      initialDescription: event.description,
+      initialStartAt: event.startAt,
+      initialEndAt: initialEndAt,
+      initialAllDay: event.allDay,
+      initialLocation: event.location,
+      onSubmit: (title, description, startAt, endAt, allDay, location) => ref
+          .read(calendarControllerProvider.notifier)
+          .updateEvent(
+            event.id,
+            UpdateCalendarEventInput(
+              title: title,
+              description: description,
+              startAt: startAt,
+              endAt: endAt,
+              allDay: allDay,
+              location: location,
+            ),
+          ),
+    );
+  }
+}
+
+/// A responsive title/description/start/end/all-day/location form, shared
+/// by [_CreateEventSheet] and [_EditEventSheet], shown as the content of a
+/// modal bottom sheet.
 ///
 /// Follows the same responsive layout as the Tasks feature's create/edit
 /// sheet: scrollable, SafeArea-aware, keyboard-avoiding, and width-capped on
 /// desktop.
-class _CreateEventSheet extends ConsumerStatefulWidget {
-  const _CreateEventSheet();
+class _EventFormSheet extends ConsumerStatefulWidget {
+  const _EventFormSheet({
+    required this.heading,
+    required this.submitLabel,
+    required this.initialTitle,
+    required this.initialDescription,
+    required this.initialStartAt,
+    required this.initialEndAt,
+    required this.initialAllDay,
+    required this.initialLocation,
+    required this.onSubmit,
+  });
+
+  final String heading;
+  final String submitLabel;
+  final String initialTitle;
+  final String? initialDescription;
+  final DateTime initialStartAt;
+  final DateTime initialEndAt;
+  final bool initialAllDay;
+  final String? initialLocation;
+
+  /// Submits the form's current (already all-day-adjusted) values. Throws
+  /// on failure, which the sheet surfaces inline without closing.
+  final Future<void> Function(
+    String title,
+    String? description,
+    DateTime startAt,
+    DateTime endAt,
+    bool allDay,
+    String? location,
+  )
+  onSubmit;
 
   @override
-  ConsumerState<_CreateEventSheet> createState() => _CreateEventSheetState();
+  ConsumerState<_EventFormSheet> createState() => _EventFormSheetState();
 }
 
-class _CreateEventSheetState extends ConsumerState<_CreateEventSheet> {
+class _EventFormSheetState extends ConsumerState<_EventFormSheet> {
   final _formKey = GlobalKey<FormState>();
-  final _titleController = TextEditingController();
-  final _descriptionController = TextEditingController();
-  final _locationController = TextEditingController();
+  late final _titleController = TextEditingController(
+    text: widget.initialTitle,
+  );
+  late final _descriptionController = TextEditingController(
+    text: widget.initialDescription ?? '',
+  );
+  late final _locationController = TextEditingController(
+    text: widget.initialLocation ?? '',
+  );
 
-  bool _allDay = false;
-  late DateTime _startAt = DateTime.now();
-  late DateTime _endAt = _startAt.add(const Duration(hours: 1));
+  late bool _allDay = widget.initialAllDay;
+  late DateTime _startAt = widget.initialStartAt;
+  late DateTime _endAt = widget.initialEndAt;
   bool _isSubmitting = false;
   String? _submitError;
 
@@ -246,17 +459,16 @@ class _CreateEventSheetState extends ConsumerState<_CreateEventSheet> {
 
     final description = _descriptionController.text.trim();
     final location = _locationController.text.trim();
-    final input = CreateCalendarEventInput(
-      title: _titleController.text.trim(),
-      description: description.isEmpty ? null : description,
-      startAt: effectiveStartAt,
-      endAt: effectiveEndAt,
-      allDay: _allDay,
-      location: location.isEmpty ? null : location,
-    );
 
     try {
-      await ref.read(calendarControllerProvider.notifier).createEvent(input);
+      await widget.onSubmit(
+        _titleController.text.trim(),
+        description.isEmpty ? null : description,
+        effectiveStartAt,
+        effectiveEndAt,
+        _allDay,
+        location.isEmpty ? null : location,
+      );
       if (mounted) Navigator.of(context).pop();
     } catch (error) {
       if (mounted) {
@@ -297,7 +509,7 @@ class _CreateEventSheetState extends ConsumerState<_CreateEventSheet> {
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
                   Text(
-                    'New event',
+                    widget.heading,
                     style: Theme.of(context).textTheme.titleLarge,
                   ),
                   const SizedBox(height: 16),
@@ -377,7 +589,7 @@ class _CreateEventSheetState extends ConsumerState<_CreateEventSheet> {
                             width: 20,
                             child: CircularProgressIndicator(strokeWidth: 2),
                           )
-                        : const Text('Create event'),
+                        : Text(widget.submitLabel),
                   ),
                 ],
               ),

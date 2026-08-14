@@ -4,6 +4,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../core/network/api_client.dart';
 import 'calendar_event.dart';
 import 'create_calendar_event_input.dart';
+import 'update_calendar_event_input.dart';
 
 /// Fetches the authenticated user's calendar events via the NestJS backend.
 ///
@@ -42,6 +43,23 @@ class CalendarRepository {
       data: input.toJson(),
     );
     return CalendarEvent.fromJson(response.data!);
+  }
+
+  Future<CalendarEvent> updateEvent(
+    String eventId,
+    UpdateCalendarEventInput input,
+  ) async {
+    final response = await _dio.patch<Map<String, dynamic>>(
+      '/calendar-events/$eventId',
+      data: input.toJson(),
+    );
+    return CalendarEvent.fromJson(response.data!);
+  }
+
+  /// The backend responds `204 No Content` on success, so there's no body
+  /// to parse.
+  Future<void> deleteEvent(String eventId) async {
+    await _dio.delete<void>('/calendar-events/$eventId');
   }
 }
 

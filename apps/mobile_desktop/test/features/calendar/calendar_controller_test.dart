@@ -7,6 +7,7 @@ import 'package:mobile_desktop/features/calendar/calendar_controller.dart';
 import 'package:mobile_desktop/features/calendar/calendar_event.dart';
 import 'package:mobile_desktop/features/calendar/calendar_repository.dart';
 import 'package:mobile_desktop/features/calendar/create_calendar_event_input.dart';
+import 'package:mobile_desktop/features/calendar/update_calendar_event_input.dart';
 
 final _event = CalendarEvent(
   id: 'event-1',
@@ -152,6 +153,138 @@ class _DelayedCreateCalendarRepository extends CalendarRepository {
   }
 
   void complete() => _completer.complete();
+}
+
+/// A repository that fetches successfully, and whose `updateEvent` succeeds,
+/// returning [eventToReturn] and recording every call.
+class _UpdatingCalendarRepository extends CalendarRepository {
+  _UpdatingCalendarRepository(this._events, this.eventToReturn) : super(Dio());
+
+  final List<CalendarEvent> _events;
+  final CalendarEvent eventToReturn;
+  int updateCallCount = 0;
+  String? lastEventId;
+  UpdateCalendarEventInput? lastInput;
+
+  @override
+  Future<List<CalendarEvent>> fetchEvents({
+    DateTime? from,
+    DateTime? to,
+  }) async => _events;
+
+  @override
+  Future<CalendarEvent> updateEvent(
+    String eventId,
+    UpdateCalendarEventInput input,
+  ) async {
+    updateCallCount++;
+    lastEventId = eventId;
+    lastInput = input;
+    return eventToReturn;
+  }
+}
+
+/// A repository that fetches successfully but whose `updateEvent` always
+/// fails.
+class _FailingUpdateCalendarRepository extends CalendarRepository {
+  _FailingUpdateCalendarRepository(this._events) : super(Dio());
+
+  final List<CalendarEvent> _events;
+
+  @override
+  Future<List<CalendarEvent>> fetchEvents({
+    DateTime? from,
+    DateTime? to,
+  }) async => _events;
+
+  @override
+  Future<CalendarEvent> updateEvent(
+    String eventId,
+    UpdateCalendarEventInput input,
+  ) async {
+    throw Exception('update failed');
+  }
+}
+
+/// A repository that fetches successfully, and whose `deleteEvent` succeeds,
+/// recording every call.
+class _DeletingCalendarRepository extends CalendarRepository {
+  _DeletingCalendarRepository(this._events) : super(Dio());
+
+  final List<CalendarEvent> _events;
+  int deleteCallCount = 0;
+  String? lastEventId;
+
+  @override
+  Future<List<CalendarEvent>> fetchEvents({
+    DateTime? from,
+    DateTime? to,
+  }) async => _events;
+
+  @override
+  Future<void> deleteEvent(String eventId) async {
+    deleteCallCount++;
+    lastEventId = eventId;
+  }
+}
+
+/// A repository that fetches successfully but whose `deleteEvent` always
+/// fails.
+class _FailingDeleteCalendarRepository extends CalendarRepository {
+  _FailingDeleteCalendarRepository(this._events) : super(Dio());
+
+  final List<CalendarEvent> _events;
+
+  @override
+  Future<List<CalendarEvent>> fetchEvents({
+    DateTime? from,
+    DateTime? to,
+  }) async => _events;
+
+  @override
+  Future<void> deleteEvent(String eventId) async {
+    throw Exception('delete failed');
+  }
+}
+
+/// A repository whose `updateEvent` and `deleteEvent` don't resolve until
+/// [completeUpdate]/[completeDelete] is called, so a test can verify that
+/// different mutation types for the same event are mutually exclusive.
+class _DelayedMixedMutationCalendarRepository extends CalendarRepository {
+  _DelayedMixedMutationCalendarRepository(this._events, this._updateResult)
+    : super(Dio());
+
+  final List<CalendarEvent> _events;
+  final CalendarEvent _updateResult;
+  final _updateCompleter = Completer<void>();
+  final _deleteCompleter = Completer<void>();
+  int updateCallCount = 0;
+  int deleteCallCount = 0;
+
+  @override
+  Future<List<CalendarEvent>> fetchEvents({
+    DateTime? from,
+    DateTime? to,
+  }) async => _events;
+
+  @override
+  Future<CalendarEvent> updateEvent(
+    String eventId,
+    UpdateCalendarEventInput input,
+  ) async {
+    updateCallCount++;
+    await _updateCompleter.future;
+    return _updateResult;
+  }
+
+  @override
+  Future<void> deleteEvent(String eventId) async {
+    deleteCallCount++;
+    await _deleteCompleter.future;
+  }
+
+  void completeUpdate() => _updateCompleter.complete();
+  void completeDelete() => _deleteCompleter.complete();
 }
 
 void main() {
@@ -380,6 +513,215 @@ void main() {
         _earlyEvent,
         _event,
       ]);
+    },
+  );
+
+  test('updateEvent replaces the matching event in place when its position '
+      'is unchanged', () async {
+    final updatedEvent = CalendarEvent(
+      id: _event.id,
+      userId: _event.userId,
+      title: 'Team sync (updated)',
+      description: _event.description,
+      startAt: _event.startAt,
+      endAt: _event.endAt,
+      allDay: _event.allDay,
+      location: _event.location,
+      createdAt: _event.createdAt,
+      updatedAt: DateTime.utc(2026, 8, 14),
+    );
+    final repository = _UpdatingCalendarRepository([
+      _earlyEvent,
+      _event,
+    ], updatedEvent);
+    final container = ProviderContainer(
+      overrides: [calendarRepositoryProvider.overrideWithValue(repository)],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(calendarControllerProvider.future);
+    final input = UpdateCalendarEventInput(
+      title: 'Team sync (updated)',
+      startAt: _event.startAt,
+      endAt: _event.endAt,
+      allDay: false,
+    );
+    await container
+        .read(calendarControllerProvider.notifier)
+        .updateEvent(_event.id, input);
+
+    expect(repository.updateCallCount, 1);
+    expect(repository.lastEventId, _event.id);
+    expect(container.read(calendarControllerProvider).value, [
+      _earlyEvent,
+      updatedEvent,
+    ]);
+  });
+
+  test('updateEvent re-sorts the list when the updated startAt moves the '
+      'event to a new position', () async {
+    final movedEvent = CalendarEvent(
+      id: _event.id,
+      userId: _event.userId,
+      title: _event.title,
+      description: _event.description,
+      startAt: DateTime.utc(2026, 8, 20, 7), // now earlier than _earlyEvent
+      endAt: DateTime.utc(2026, 8, 20, 7, 30),
+      allDay: _event.allDay,
+      location: _event.location,
+      createdAt: _event.createdAt,
+      updatedAt: DateTime.utc(2026, 8, 14),
+    );
+    final repository = _UpdatingCalendarRepository([
+      _earlyEvent,
+      _event,
+    ], movedEvent);
+    final container = ProviderContainer(
+      overrides: [calendarRepositoryProvider.overrideWithValue(repository)],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(calendarControllerProvider.future);
+    await container
+        .read(calendarControllerProvider.notifier)
+        .updateEvent(
+          _event.id,
+          UpdateCalendarEventInput(
+            title: movedEvent.title,
+            startAt: movedEvent.startAt,
+            endAt: movedEvent.endAt,
+            allDay: movedEvent.allDay,
+          ),
+        );
+
+    expect(container.read(calendarControllerProvider).value, [
+      movedEvent,
+      _earlyEvent,
+    ]);
+  });
+
+  test('updateEvent surfaces errors to the caller without wiping the loaded '
+      'list', () async {
+    final container = ProviderContainer(
+      overrides: [
+        calendarRepositoryProvider.overrideWithValue(
+          _FailingUpdateCalendarRepository([_event]),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(calendarControllerProvider.future);
+
+    await expectLater(
+      container
+          .read(calendarControllerProvider.notifier)
+          .updateEvent(
+            _event.id,
+            UpdateCalendarEventInput(
+              title: 'Bad update',
+              startAt: _event.startAt,
+              endAt: _event.endAt,
+              allDay: false,
+            ),
+          ),
+      throwsException,
+    );
+
+    expect(
+      container.read(calendarControllerProvider),
+      isA<AsyncData<Object?>>(),
+    );
+    expect(container.read(calendarControllerProvider).value, [_event]);
+  });
+
+  test('deleteEvent removes the event from the loaded list', () async {
+    final repository = _DeletingCalendarRepository([_earlyEvent, _event]);
+    final container = ProviderContainer(
+      overrides: [calendarRepositoryProvider.overrideWithValue(repository)],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(calendarControllerProvider.future);
+    await container
+        .read(calendarControllerProvider.notifier)
+        .deleteEvent(_event.id);
+
+    expect(repository.deleteCallCount, 1);
+    expect(repository.lastEventId, _event.id);
+    expect(container.read(calendarControllerProvider).value, [_earlyEvent]);
+  });
+
+  test('deleteEvent surfaces errors to the caller without wiping the loaded '
+      'list', () async {
+    final container = ProviderContainer(
+      overrides: [
+        calendarRepositoryProvider.overrideWithValue(
+          _FailingDeleteCalendarRepository([_event]),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(calendarControllerProvider.future);
+
+    await expectLater(
+      container
+          .read(calendarControllerProvider.notifier)
+          .deleteEvent(_event.id),
+      throwsException,
+    );
+
+    expect(container.read(calendarControllerProvider).value, [_event]);
+  });
+
+  test(
+    'a pending update blocks a concurrent delete for the same event',
+    () async {
+      final updatedEvent = CalendarEvent(
+        id: _event.id,
+        userId: _event.userId,
+        title: 'Team sync (updated)',
+        description: _event.description,
+        startAt: _event.startAt,
+        endAt: _event.endAt,
+        allDay: _event.allDay,
+        location: _event.location,
+        createdAt: _event.createdAt,
+        updatedAt: DateTime.utc(2026, 8, 14),
+      );
+      final repository = _DelayedMixedMutationCalendarRepository([
+        _event,
+      ], updatedEvent);
+      final container = ProviderContainer(
+        overrides: [calendarRepositoryProvider.overrideWithValue(repository)],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(calendarControllerProvider.future);
+
+      final notifier = container.read(calendarControllerProvider.notifier);
+      // Started first, so it wins the guard: the concurrent delete below
+      // should be silently ignored rather than racing it.
+      final updateFuture = notifier.updateEvent(
+        _event.id,
+        UpdateCalendarEventInput(
+          title: updatedEvent.title,
+          startAt: updatedEvent.startAt,
+          endAt: updatedEvent.endAt,
+          allDay: updatedEvent.allDay,
+        ),
+      );
+      final deleteFuture = notifier.deleteEvent(_event.id);
+
+      repository.completeUpdate();
+      repository.completeDelete();
+      await updateFuture;
+      await deleteFuture;
+
+      expect(repository.updateCallCount, 1);
+      expect(repository.deleteCallCount, 0);
+      expect(container.read(calendarControllerProvider).value, [updatedEvent]);
     },
   );
 }
