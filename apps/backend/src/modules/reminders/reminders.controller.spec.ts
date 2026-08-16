@@ -31,6 +31,9 @@ describe('RemindersController', () => {
       update: jest.fn().mockResolvedValue(reminder),
       remove: jest.fn().mockResolvedValue(undefined),
       cancel: jest.fn().mockResolvedValue({ ...reminder, status: 'cancelled' }),
+      reactivate: jest
+        .fn()
+        .mockResolvedValue({ ...reminder, status: 'pending' }),
     };
 
     const module: TestingModule = await Test.createTestingModule({
@@ -91,5 +94,11 @@ describe('RemindersController', () => {
     await controller.cancel(userId, reminder.id);
 
     expect(service.cancel).toHaveBeenCalledWith(userId, reminder.id);
+  });
+
+  it('delegates reactivate to the service', async () => {
+    await controller.reactivate(userId, reminder.id);
+
+    expect(service.reactivate).toHaveBeenCalledWith(userId, reminder.id);
   });
 });

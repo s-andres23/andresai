@@ -65,4 +65,12 @@ export class RemindersController {
   ) {
     return this.remindersService.cancel(userId, id);
   }
+
+  @Post(':id/reactivate')
+  reactivate(
+    @CurrentUser() userId: string,
+    @Param('id', ParseUUIDPipe) id: string,
+  ) {
+    return this.remindersService.reactivate(userId, id);
+  }
 }

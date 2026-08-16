@@ -84,6 +84,24 @@ class _CancellingRemindersRepository extends RemindersRepository {
   }
 }
 
+class _ReactivatingRemindersRepository extends RemindersRepository {
+  _ReactivatingRemindersRepository(this._reminders, this.reminderToReturn)
+    : super(Dio());
+
+  final List<Reminder> _reminders;
+  final Reminder reminderToReturn;
+  int reactivateCallCount = 0;
+
+  @override
+  Future<List<Reminder>> fetchReminders() async => _reminders;
+
+  @override
+  Future<Reminder> reactivateReminder(String reminderId) async {
+    reactivateCallCount++;
+    return reminderToReturn;
+  }
+}
+
 class _DeletingRemindersRepository extends RemindersRepository {
   _DeletingRemindersRepository(this._reminders) : super(Dio());
 
@@ -420,6 +438,7 @@ void main() {
     expect(find.text('Edit'), findsOneWidget);
     expect(find.text('Cancel'), findsOneWidget);
     expect(find.text('Delete'), findsOneWidget);
+    expect(find.text('Reactivate'), findsNothing);
   });
 
   testWidgets(
@@ -450,13 +469,14 @@ void main() {
 
       expect(find.text('Edit'), findsNothing);
       expect(find.text('Cancel'), findsNothing);
+      expect(find.text('Reactivate'), findsNothing);
       expect(find.text('Delete'), findsOneWidget);
     },
   );
 
   testWidgets(
-    'a cancelled reminder only shows delete (no edit/cancel actions the '
-    'backend would reject)',
+    'a cancelled reminder shows Reactivate and Delete only (no Edit/Cancel '
+    'the backend would reject)',
     (tester) async {
       final cancelled = Reminder(
         id: 'reminder-1',
@@ -480,6 +500,7 @@ void main() {
 
       expect(find.text('Edit'), findsNothing);
       expect(find.text('Cancel'), findsNothing);
+      expect(find.text('Reactivate'), findsOneWidget);
       expect(find.text('Delete'), findsOneWidget);
     },
   );
@@ -512,6 +533,49 @@ void main() {
     expect(find.text('Cancelled'), findsOneWidget);
     // The reminder stays in the list rather than disappearing.
     expect(find.text(reminder.title), findsOneWidget);
+  });
+
+  testWidgets('reactivating a cancelled reminder updates its status in place', (
+    tester,
+  ) async {
+    final cancelled = Reminder(
+      id: 'reminder-1',
+      userId: 'user-1',
+      taskId: null,
+      calendarEventId: null,
+      title: 'Call insurance',
+      triggerType: ReminderTriggerType.absolute,
+      offsetMinutes: null,
+      remindAt: DateTime.utc(2026, 8, 18, 18),
+      status: ReminderStatus.cancelled,
+      createdAt: DateTime.utc(2026, 8, 14),
+      updatedAt: DateTime.utc(2026, 8, 14),
+    );
+    final reactivated = Reminder(
+      id: cancelled.id,
+      userId: cancelled.userId,
+      taskId: null,
+      calendarEventId: null,
+      title: cancelled.title,
+      triggerType: cancelled.triggerType,
+      offsetMinutes: null,
+      remindAt: cancelled.remindAt,
+      status: ReminderStatus.pending,
+      createdAt: cancelled.createdAt,
+      updatedAt: DateTime.utc(2026, 8, 15),
+    );
+    final repository = _ReactivatingRemindersRepository([
+      cancelled,
+    ], reactivated);
+    await _pumpRemindersPage(tester, remindersRepository: repository);
+
+    await _openReminderMenu(tester);
+    await tester.tap(find.text('Reactivate'));
+    await tester.pumpAndSettle();
+
+    expect(repository.reactivateCallCount, 1);
+    expect(find.text('Pending'), findsOneWidget);
+    expect(find.text(cancelled.title), findsOneWidget);
   });
 
   testWidgets('confirming delete removes the reminder from the list', (

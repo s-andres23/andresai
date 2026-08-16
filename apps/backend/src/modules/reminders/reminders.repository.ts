@@ -198,6 +198,38 @@ export class RemindersRepository {
     return (data as unknown as ReminderRow[]).map(mapReminderRow);
   }
 
+  /**
+   * Reactivates a cancelled reminder: sets `status` back to `pending` and
+   * writes `remindAt`, scoped to the user. `remindAt` is passed in
+   * already-validated (in the future) and already-resolved by
+   * {@link RemindersService.reactivate} -- unchanged for an absolute
+   * reminder, freshly recalculated from the current Calendar event for a
+   * relative one -- so this is a plain write, not a recalculation.
+   */
+  async reactivate(
+    userId: string,
+    id: string,
+    remindAt: string,
+  ): Promise<Reminder> {
+    const { data, error } = await this.client
+      .from('reminders')
+      .update({
+        status: 'pending',
+        remind_at: remindAt,
+        updated_at: new Date().toISOString(),
+      })
+      .eq('user_id', userId)
+      .eq('id', id)
+      .select(REMINDER_COLUMNS)
+      .single();
+
+    if (error) {
+      throw error;
+    }
+
+    return mapReminderRow(data);
+  }
+
   /** Updates only `remind_at` (plus `updated_at`), scoped to the user. */
   async updateRemindAt(
     userId: string,

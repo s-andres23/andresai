@@ -118,6 +118,25 @@ class RemindersController extends AsyncNotifier<List<Reminder>> {
         );
       });
 
+  /// Reactivates [reminderId] (`cancelled` -> `pending`) and re-inserts it
+  /// at the position matching its (possibly recalculated, for a relative
+  /// Calendar reminder) `remindAt` so the list stays ordered ascending.
+  Future<void> reactivateReminder(String reminderId) =>
+      _runExclusive(reminderId, () async {
+        final updated = await ref
+            .read(remindersRepositoryProvider)
+            .reactivateReminder(reminderId);
+        final current = List<Reminder>.from(state.value ?? const [])
+          ..removeWhere((reminder) => reminder.id == updated.id);
+        _insertSorted(current, updated);
+        state = AsyncValue.data(current);
+        await _notifySafely(
+          () => ref
+              .read(localNotificationServiceProvider)
+              .scheduleReminder(updated),
+        );
+      });
+
   /// Deletes [reminderId] and removes it from the loaded list.
   Future<void> deleteReminder(String reminderId) =>
       _runExclusive(reminderId, () async {

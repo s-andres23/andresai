@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../reminders/reminders_controller.dart';
 import 'calendar_event.dart';
 import 'calendar_repository.dart';
 import 'create_calendar_event_input.dart';
@@ -9,6 +10,15 @@ import 'update_calendar_event_input.dart';
 ///
 /// Exposes loading/data/error via [AsyncValue] so the UI reacts to each
 /// state without manual bookkeeping.
+///
+/// Depends on `remindersControllerProvider` (a cross-feature import,
+/// deliberately, mirroring the backend's Calendar -> Reminders sync): when a
+/// startAt change is persisted, the backend has already recalculated any
+/// linked pending relative reminders, so this invalidates Reminders' loaded
+/// state to pull those recalculated values in immediately rather than
+/// leaving the Reminders tab stale until its own next reload. Calendar
+/// never computes or patches reminder times itself -- the backend stays the
+/// only source of truth for `remindAt`.
 class CalendarController extends AsyncNotifier<List<CalendarEvent>> {
   bool _isCreating = false;
   final Set<String> _pendingEventIds = {};
@@ -50,8 +60,15 @@ class CalendarController extends AsyncNotifier<List<CalendarEvent>> {
   /// Updates [eventId] and replaces it in place in the loaded list,
   /// re-inserting it at the position matching its (possibly changed)
   /// `startAt` so the list stays ordered ascending.
+  ///
+  /// If the persisted `startAt` actually changed, also invalidates
+  /// [remindersControllerProvider] so any pending relative reminders the
+  /// backend just recalculated are picked up immediately -- title/
+  /// description/location-only edits never touch reminders, so they don't
+  /// trigger this.
   Future<void> updateEvent(String eventId, UpdateCalendarEventInput input) =>
       _runExclusive(eventId, () async {
+        final existing = _findById(state.value ?? const [], eventId);
         final updated = await ref
             .read(calendarRepositoryProvider)
             .updateEvent(eventId, input);
@@ -59,7 +76,31 @@ class CalendarController extends AsyncNotifier<List<CalendarEvent>> {
           ..removeWhere((event) => event.id == updated.id);
         _insertSorted(current, updated);
         state = AsyncValue.data(current);
+
+        // Compare instants (not formatted strings, and not DateTime== --
+        // which also requires matching isUtc) so a UTC-vs-local
+        // representation difference between what was loaded and what the
+        // backend just returned is never mistaken for a real change.
+        final startAtChanged =
+            existing == null ||
+            existing.startAt.millisecondsSinceEpoch !=
+                updated.startAt.millisecondsSinceEpoch;
+        if (startAtChanged) {
+          // Synchronous and never throws -- just marks Reminders' loaded
+          // state stale. The actual refetch/reconciliation (and its own
+          // failure handling) happens inside RemindersController itself, so
+          // it can never roll back or corrupt the Calendar update this
+          // method just successfully persisted.
+          ref.invalidate(remindersControllerProvider);
+        }
       });
+
+  CalendarEvent? _findById(List<CalendarEvent> events, String id) {
+    for (final event in events) {
+      if (event.id == id) return event;
+    }
+    return null;
+  }
 
   /// Deletes [eventId] and removes it from the loaded list.
   Future<void> deleteEvent(String eventId) => _runExclusive(eventId, () async {

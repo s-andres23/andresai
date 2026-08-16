@@ -117,6 +117,38 @@ class _DeletingRemindersRepository extends RemindersRepository {
   Future<void> deleteReminder(String reminderId) async {}
 }
 
+class _ReactivatingRemindersRepository extends RemindersRepository {
+  _ReactivatingRemindersRepository(this._reminders, this.reminderToReturn)
+    : super(Dio());
+
+  final List<Reminder> _reminders;
+  final Reminder reminderToReturn;
+  int reactivateCallCount = 0;
+
+  @override
+  Future<List<Reminder>> fetchReminders() async => _reminders;
+
+  @override
+  Future<Reminder> reactivateReminder(String reminderId) async {
+    reactivateCallCount++;
+    return reminderToReturn;
+  }
+}
+
+class _FailingReactivateRemindersRepository extends RemindersRepository {
+  _FailingReactivateRemindersRepository(this._reminders) : super(Dio());
+
+  final List<Reminder> _reminders;
+
+  @override
+  Future<List<Reminder>> fetchReminders() async => _reminders;
+
+  @override
+  Future<Reminder> reactivateReminder(String reminderId) async {
+    throw Exception('reactivate failed: remindAt is in the past');
+  }
+}
+
 void main() {
   test(
     'a successful create attempts to schedule a local notification',
@@ -347,5 +379,201 @@ void main() {
       gateway.scheduled[reminderNotificationId(cancelledReminder.id)],
       isNull,
     );
+  });
+
+  test('a successful reactivate replaces the cancelled reminder with the '
+      'pending one the backend returns', () async {
+    final gateway = FakeNotificationPluginGateway();
+    final cancelled = _reminder(status: ReminderStatus.cancelled);
+    final reactivated = _reminder();
+    final repository = _ReactivatingRemindersRepository([
+      cancelled,
+    ], reactivated);
+    final container = ProviderContainer(
+      overrides: [
+        remindersRepositoryProvider.overrideWithValue(repository),
+        localNotificationServiceProvider.overrideWithValue(
+          LocalNotificationService(gateway: gateway),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(remindersControllerProvider.future);
+    await container
+        .read(remindersControllerProvider.notifier)
+        .reactivateReminder(cancelled.id);
+
+    expect(repository.reactivateCallCount, 1);
+    expect(container.read(remindersControllerProvider).value, [reactivated]);
+    expect(
+      container.read(remindersControllerProvider).value!.single.status,
+      ReminderStatus.pending,
+    );
+  });
+
+  test(
+    're-sorts the list when reactivation returns a changed remindAt (a '
+    'relative Calendar reminder recalculated against the current event)',
+    () async {
+      final gateway = FakeNotificationPluginGateway();
+      final earlier = _reminder(
+        id: 'reminder-earlier',
+        remindAt: DateTime.now().add(const Duration(minutes: 30)),
+      );
+      final cancelled = _reminder(
+        id: 'reminder-cancelled',
+        status: ReminderStatus.cancelled,
+        remindAt: DateTime.now().add(const Duration(hours: 5)),
+      );
+      // Reactivation recalculates it to land *before* `earlier`.
+      final reactivated = _reminder(
+        id: 'reminder-cancelled',
+        remindAt: DateTime.now().add(const Duration(minutes: 10)),
+      );
+      final repository = _ReactivatingRemindersRepository([
+        earlier,
+        cancelled,
+      ], reactivated);
+      final container = ProviderContainer(
+        overrides: [
+          remindersRepositoryProvider.overrideWithValue(repository),
+          localNotificationServiceProvider.overrideWithValue(
+            LocalNotificationService(gateway: gateway),
+          ),
+        ],
+      );
+      addTearDown(container.dispose);
+
+      await container.read(remindersControllerProvider.future);
+      await container
+          .read(remindersControllerProvider.notifier)
+          .reactivateReminder(cancelled.id);
+
+      expect(container.read(remindersControllerProvider).value, [
+        reactivated,
+        earlier,
+      ]);
+    },
+  );
+
+  test('a successful reactivate schedules a local notification from the '
+      'returned reminder', () async {
+    final gateway = FakeNotificationPluginGateway();
+    final cancelled = _reminder(status: ReminderStatus.cancelled);
+    final reactivated = _reminder();
+    final repository = _ReactivatingRemindersRepository([
+      cancelled,
+    ], reactivated);
+    final container = ProviderContainer(
+      overrides: [
+        remindersRepositoryProvider.overrideWithValue(repository),
+        localNotificationServiceProvider.overrideWithValue(
+          LocalNotificationService(gateway: gateway),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(remindersControllerProvider.future);
+    await container
+        .read(remindersControllerProvider.notifier)
+        .reactivateReminder(cancelled.id);
+
+    expect(
+      gateway.scheduled[reminderNotificationId(reactivated.id)],
+      isNotNull,
+    );
+  });
+
+  test('a notification scheduling exception during reactivate does not undo '
+      'the successful backend reactivation', () async {
+    final gateway = FakeNotificationPluginGateway()..throwOnSchedule = true;
+    final cancelled = _reminder(status: ReminderStatus.cancelled);
+    final reactivated = _reminder();
+    final repository = _ReactivatingRemindersRepository([
+      cancelled,
+    ], reactivated);
+    final container = ProviderContainer(
+      overrides: [
+        remindersRepositoryProvider.overrideWithValue(repository),
+        localNotificationServiceProvider.overrideWithValue(
+          LocalNotificationService(gateway: gateway),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(remindersControllerProvider.future);
+    await container
+        .read(remindersControllerProvider.notifier)
+        .reactivateReminder(cancelled.id);
+
+    expect(
+      container.read(remindersControllerProvider),
+      isA<AsyncData<Object?>>(),
+    );
+    expect(container.read(remindersControllerProvider).value, [reactivated]);
+  });
+
+  test('a failed backend reactivate preserves the loaded state and rethrows '
+      'to the caller', () async {
+    final gateway = FakeNotificationPluginGateway();
+    final cancelled = _reminder(status: ReminderStatus.cancelled);
+    final repository = _FailingReactivateRemindersRepository([cancelled]);
+    final container = ProviderContainer(
+      overrides: [
+        remindersRepositoryProvider.overrideWithValue(repository),
+        localNotificationServiceProvider.overrideWithValue(
+          LocalNotificationService(gateway: gateway),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(remindersControllerProvider.future);
+
+    await expectLater(
+      container
+          .read(remindersControllerProvider.notifier)
+          .reactivateReminder(cancelled.id),
+      throwsException,
+    );
+
+    expect(
+      container.read(remindersControllerProvider),
+      isA<AsyncData<Object?>>(),
+    );
+    expect(container.read(remindersControllerProvider).value, [cancelled]);
+    expect(gateway.scheduleCallCount, 0);
+  });
+
+  test('a second reactivate call for the same reminder while one is already '
+      'in flight is ignored', () async {
+    final gateway = FakeNotificationPluginGateway();
+    final cancelled = _reminder(status: ReminderStatus.cancelled);
+    final reactivated = _reminder();
+    final repository = _ReactivatingRemindersRepository([
+      cancelled,
+    ], reactivated);
+    final container = ProviderContainer(
+      overrides: [
+        remindersRepositoryProvider.overrideWithValue(repository),
+        localNotificationServiceProvider.overrideWithValue(
+          LocalNotificationService(gateway: gateway),
+        ),
+      ],
+    );
+    addTearDown(container.dispose);
+
+    await container.read(remindersControllerProvider.future);
+
+    final notifier = container.read(remindersControllerProvider.notifier);
+    final first = notifier.reactivateReminder(cancelled.id);
+    final second = notifier.reactivateReminder(cancelled.id);
+    await first;
+    await second;
+
+    expect(repository.reactivateCallCount, 1);
   });
 }

@@ -55,6 +55,13 @@ class RemindersRepository {
     );
     return Reminder.fromJson(response.data!);
   }
+
+  Future<Reminder> reactivateReminder(String reminderId) async {
+    final response = await _dio.post<Map<String, dynamic>>(
+      '/reminders/$reminderId/reactivate',
+    );
+    return Reminder.fromJson(response.data!);
+  }
 }
 
 final remindersRepositoryProvider = Provider<RemindersRepository>((ref) {

@@ -79,6 +79,70 @@ export class RemindersService {
   }
 
   /**
+   * Reactivates a cancelled reminder back to `pending`.
+   *
+   * - Already `pending`: returned as-is (idempotent), matching the existing
+   *   `cancel()`/Tasks complete-reopen convention -- no write.
+   * - `triggered`: rejected; a triggered reminder can never go back to
+   *   `pending`.
+   * - `cancelled`, absolute: reactivated only if its existing `remindAt` is
+   *   still in the future; otherwise rejected -- the caller must edit or
+   *   recreate it rather than have the backend silently pick a new time.
+   * - `cancelled`, relative Calendar: `remindAt` is recalculated from the
+   *   *current* linked Calendar event's `startAt` (never the stale stored
+   *   value), then reactivated only if that recalculated instant is still
+   *   in the future.
+   * - `cancelled`, relative Task: remains unsupported -- reuses
+   *   {@link calculateRemindAtFromTask}, which always throws
+   *   `UnprocessableEntityException`, the same as create/update.
+   */
+  async reactivate(userId: string, id: string): Promise<Reminder> {
+    const reminder = await this.findOne(userId, id);
+
+    if (reminder.status === 'pending') {
+      return reminder;
+    }
+
+    if (reminder.status === 'triggered') {
+      throw new BadRequestException(
+        'Cannot reactivate a reminder that has already triggered',
+      );
+    }
+
+    const remindAt =
+      reminder.triggerType === 'absolute'
+        ? reminder.remindAt
+        : await this.recalculateRelativeRemindAt(userId, reminder);
+
+    if (new Date(remindAt).getTime() <= Date.now()) {
+      throw new BadRequestException(
+        'Cannot reactivate: remindAt is in the past. Edit or create a new reminder instead.',
+      );
+    }
+
+    return this.remindersRepository.reactivate(userId, id, remindAt);
+  }
+
+  private async recalculateRelativeRemindAt(
+    userId: string,
+    reminder: Reminder,
+  ): Promise<string> {
+    if (reminder.calendarEventId) {
+      const calendarEvent = await this.calendarService.findOne(
+        userId,
+        reminder.calendarEventId,
+      );
+      return this.calculateRemindAtFromCalendarEvent(
+        calendarEvent,
+        reminder.offsetMinutes!,
+      );
+    }
+
+    const task = await this.tasksService.findOne(userId, reminder.taskId!);
+    return this.calculateRemindAtFromTask(task);
+  }
+
+  /**
    * Resolves the effective merged state for a create or update, validates
    * it, and (for relative reminders) authoritatively (re)calculates
    * `remindAt` server-side -- the client-supplied value is never trusted

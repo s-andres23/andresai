@@ -253,7 +253,7 @@ class _RemindersList extends StatelessWidget {
   }
 }
 
-enum _ReminderAction { edit, cancel, delete }
+enum _ReminderAction { edit, cancel, reactivate, delete }
 
 class _ReminderTile extends ConsumerStatefulWidget {
   const _ReminderTile({super.key, required this.reminder});
@@ -288,6 +288,25 @@ class _ReminderTileState extends ConsumerState<_ReminderTile> {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           SnackBar(content: Text('Failed to cancel reminder: $error')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isUpdating = false);
+    }
+  }
+
+  Future<void> _reactivateReminder() async {
+    if (_isUpdating) return;
+    setState(() => _isUpdating = true);
+
+    try {
+      await ref
+          .read(remindersControllerProvider.notifier)
+          .reactivateReminder(widget.reminder.id);
+    } catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Failed to reactivate reminder: $error')),
         );
       }
     } finally {
@@ -339,6 +358,7 @@ class _ReminderTileState extends ConsumerState<_ReminderTile> {
   Widget build(BuildContext context) {
     final reminder = widget.reminder;
     final isPending = reminder.status == ReminderStatus.pending;
+    final isCancelled = reminder.status == ReminderStatus.cancelled;
     final dateTimeLabel =
         '${formatCalendarDate(reminder.remindAt)} · '
         '${formatCalendarTime(reminder.remindAt)}';
@@ -397,13 +417,16 @@ class _ReminderTileState extends ConsumerState<_ReminderTile> {
                 _openEditSheet();
               case _ReminderAction.cancel:
                 _cancelReminder();
+              case _ReminderAction.reactivate:
+                _reactivateReminder();
               case _ReminderAction.delete:
                 _confirmDelete();
             }
           },
-          // Triggered/cancelled reminders can't be edited or cancelled --
-          // the backend rejects both -- so those actions are hidden rather
-          // than shown and left to fail.
+          // A triggered reminder can't be edited, cancelled, or reactivated
+          // -- the backend rejects all three -- so only Delete is shown for
+          // it. A cancelled reminder can't be edited or cancelled again, but
+          // can be reactivated back to pending.
           itemBuilder: (context) => [
             if (isPending)
               const PopupMenuItem(
@@ -414,6 +437,11 @@ class _ReminderTileState extends ConsumerState<_ReminderTile> {
               const PopupMenuItem(
                 value: _ReminderAction.cancel,
                 child: Text('Cancel'),
+              ),
+            if (isCancelled)
+              const PopupMenuItem(
+                value: _ReminderAction.reactivate,
+                child: Text('Reactivate'),
               ),
             const PopupMenuItem(
               value: _ReminderAction.delete,

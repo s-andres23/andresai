@@ -191,4 +191,17 @@ void main() {
       expect(reminder.status, ReminderStatus.cancelled);
     },
   );
+
+  test('reactivateReminder posts to /reminders/:id/reactivate and parses the '
+      'response', () async {
+    final adapter = _StubAdapter(jsonEncode(_row(status: 'pending')));
+    final dio = Dio()..httpClientAdapter = adapter;
+    final repository = RemindersRepository(dio);
+
+    final reminder = await repository.reactivateReminder('reminder-1');
+
+    expect(adapter.lastOptions!.path, '/reminders/reminder-1/reactivate');
+    expect(adapter.lastOptions!.method, 'POST');
+    expect(reminder.status, ReminderStatus.pending);
+  });
 }

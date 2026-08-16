@@ -235,4 +235,39 @@ describe('RemindersRepository', () => {
     expect(queryBuilder.eq).toHaveBeenCalledWith('user_id', userId);
     expect(queryBuilder.eq).toHaveBeenCalledWith('id', row.id);
   });
+
+  it('reactivate writes status pending, remind_at, and updated_at, scoped by user_id and id', async () => {
+    const queryBuilder = createQueryBuilder({
+      data: { ...row, status: 'pending' },
+      error: null,
+    });
+    const { repository } = buildRepository(queryBuilder);
+
+    const reminder = await repository.reactivate(
+      userId,
+      row.id,
+      '2099-01-01T08:45:00.000Z',
+    );
+
+    expect(queryBuilder.update).toHaveBeenCalledWith({
+      status: 'pending',
+      remind_at: '2099-01-01T08:45:00.000Z',
+      updated_at: expect.any(String) as unknown,
+    });
+    expect(queryBuilder.eq).toHaveBeenCalledWith('user_id', userId);
+    expect(queryBuilder.eq).toHaveBeenCalledWith('id', row.id);
+    expect(reminder.status).toBe('pending');
+  });
+
+  it('reactivate throws when Supabase returns an error', async () => {
+    const queryBuilder = createQueryBuilder({
+      data: null,
+      error: new Error('db error'),
+    });
+    const { repository } = buildRepository(queryBuilder);
+
+    await expect(
+      repository.reactivate(userId, row.id, '2099-01-01T08:45:00.000Z'),
+    ).rejects.toThrow('db error');
+  });
 });
