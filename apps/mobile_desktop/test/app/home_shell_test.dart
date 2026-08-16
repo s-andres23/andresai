@@ -5,6 +5,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:mobile_desktop/app/home_shell.dart';
 import 'package:mobile_desktop/features/calendar/calendar_event.dart';
 import 'package:mobile_desktop/features/calendar/calendar_repository.dart';
+import 'package:mobile_desktop/features/reminders/reminder.dart';
+import 'package:mobile_desktop/features/reminders/reminders_repository.dart';
 import 'package:mobile_desktop/features/tasks/task.dart';
 import 'package:mobile_desktop/features/tasks/tasks_repository.dart';
 
@@ -30,9 +32,22 @@ class _FakeCalendarRepository extends CalendarRepository {
   }) async => const [];
 }
 
+class _FakeRemindersRepository extends RemindersRepository {
+  _FakeRemindersRepository() : super(Dio());
+
+  int fetchCallCount = 0;
+
+  @override
+  Future<List<Reminder>> fetchReminders() async {
+    fetchCallCount++;
+    return const [];
+  }
+}
+
 Future<void> _pumpHomeShell(
   WidgetTester tester, {
   TasksRepository? tasksRepository,
+  RemindersRepository? remindersRepository,
 }) async {
   await tester.pumpWidget(
     ProviderScope(
@@ -41,6 +56,9 @@ Future<void> _pumpHomeShell(
           tasksRepository ?? _FakeTasksRepository(),
         ),
         calendarRepositoryProvider.overrideWithValue(_FakeCalendarRepository()),
+        remindersRepositoryProvider.overrideWithValue(
+          remindersRepository ?? _FakeRemindersRepository(),
+        ),
       ],
       child: const MaterialApp(home: HomeShell()),
     ),
@@ -62,6 +80,7 @@ void main() {
     expect(find.text('No tasks yet.'), findsOneWidget);
     expect(_navDestination('Tasks'), findsOneWidget);
     expect(_navDestination('Calendar'), findsOneWidget);
+    expect(_navDestination('Reminders'), findsOneWidget);
   });
 
   testWidgets('switches to the Calendar tab and back', (tester) async {
@@ -84,6 +103,17 @@ void main() {
     expect(find.text('No tasks yet.'), findsOneWidget);
   });
 
+  testWidgets('switches to the Reminders tab', (tester) async {
+    await _pumpHomeShell(tester);
+
+    await tester.tap(_navDestination('Reminders'));
+    await tester.pumpAndSettle();
+
+    expect(_selectedNavIndex(tester), 2);
+    expect(find.text('No reminders yet.'), findsOneWidget);
+    expect(find.text('No tasks yet.'), findsNothing);
+  });
+
   testWidgets(
     'the Tasks tab\'s content still exists offstage while Calendar is '
     'selected (IndexedStack keeps it alive)',
@@ -101,19 +131,27 @@ void main() {
     tester,
   ) async {
     final tasksRepository = _FakeTasksRepository();
-    await _pumpHomeShell(tester, tasksRepository: tasksRepository);
+    final remindersRepository = _FakeRemindersRepository();
+    await _pumpHomeShell(
+      tester,
+      tasksRepository: tasksRepository,
+      remindersRepository: remindersRepository,
+    );
 
     expect(tasksRepository.fetchCallCount, 1);
+    expect(remindersRepository.fetchCallCount, 1);
 
+    await tester.tap(_navDestination('Reminders'));
+    await tester.pumpAndSettle();
     await tester.tap(_navDestination('Calendar'));
     await tester.pumpAndSettle();
     await tester.tap(_navDestination('Tasks'));
     await tester.pumpAndSettle();
 
-    // IndexedStack keeps the Tasks page (and its controller) alive while
-    // the Calendar tab is selected, so returning to it must not trigger
-    // another GET /tasks.
+    // IndexedStack keeps every page (and its controller) alive while another
+    // tab is selected, so returning to a tab must not trigger another fetch.
     expect(tasksRepository.fetchCallCount, 1);
+    expect(remindersRepository.fetchCallCount, 1);
   });
 
   testWidgets('sign-out is available on each tab', (tester) async {
@@ -122,6 +160,11 @@ void main() {
     expect(find.byTooltip('Sign out'), findsOneWidget);
 
     await tester.tap(_navDestination('Calendar'));
+    await tester.pumpAndSettle();
+
+    expect(find.byTooltip('Sign out'), findsOneWidget);
+
+    await tester.tap(_navDestination('Reminders'));
     await tester.pumpAndSettle();
 
     expect(find.byTooltip('Sign out'), findsOneWidget);

@@ -1,13 +1,14 @@
 import 'package:flutter/material.dart';
 
 import '../features/calendar/calendar_page.dart';
+import '../features/reminders/reminders_page.dart';
 import '../features/tasks/tasks_page.dart';
 
-/// Temporary navigation shell for switching between the Tasks and Calendar
-/// features while signed in.
+/// Temporary navigation shell for switching between the Tasks, Calendar, and
+/// Reminders features while signed in.
 ///
 /// This is not the final AndresAI navigation, just a minimal way to reach
-/// both features during V0.1 development.
+/// these features during V0.1 development.
 class HomeShell extends StatefulWidget {
   const HomeShell({super.key});
 
@@ -19,9 +20,9 @@ class _HomeShellState extends State<HomeShell> {
   int _selectedIndex = 0;
 
   // An IndexedStack (rather than only building the selected page) keeps
-  // both pages' controllers alive across tab switches, so switching tabs
+  // every page's controller alive across tab switches, so switching tabs
   // doesn't re-trigger a network fetch every time.
-  static const _pages = [TasksPage(), CalendarPage()];
+  static const _pages = [TasksPage(), CalendarPage(), RemindersPage()];
 
   @override
   Widget build(BuildContext context) {
@@ -41,6 +42,11 @@ class _HomeShellState extends State<HomeShell> {
             icon: Icon(Icons.calendar_month_outlined),
             selectedIcon: Icon(Icons.calendar_month),
             label: 'Calendar',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.notifications_outlined),
+            selectedIcon: Icon(Icons.notifications),
+            label: 'Reminders',
           ),
         ],
       ),
