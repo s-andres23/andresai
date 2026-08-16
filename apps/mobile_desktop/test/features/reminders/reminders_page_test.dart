@@ -2,6 +2,8 @@ import 'package:dio/dio.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mobile_desktop/core/notifications/local_notification_service.dart';
+import 'package:mobile_desktop/core/notifications/notification_permission_state.dart';
 import 'package:mobile_desktop/features/calendar/calendar_date_format.dart';
 import 'package:mobile_desktop/features/calendar/calendar_event.dart';
 import 'package:mobile_desktop/features/calendar/calendar_repository.dart';
@@ -11,6 +13,8 @@ import 'package:mobile_desktop/features/reminders/reminders_page.dart';
 import 'package:mobile_desktop/features/reminders/reminders_repository.dart';
 import 'package:mobile_desktop/features/tasks/task.dart';
 import 'package:mobile_desktop/features/tasks/tasks_repository.dart';
+
+import '../../support/fake_notification_plugin_gateway.dart';
 
 class _FakeRemindersRepository extends RemindersRepository {
   _FakeRemindersRepository([this._reminders = const []]) : super(Dio());
@@ -100,6 +104,7 @@ Future<void> _pumpRemindersPage(
   required RemindersRepository remindersRepository,
   TasksRepository? tasksRepository,
   CalendarRepository? calendarRepository,
+  LocalNotificationService? notificationService,
 }) async {
   await tester.pumpWidget(
     ProviderScope(
@@ -110,6 +115,15 @@ Future<void> _pumpRemindersPage(
         ),
         calendarRepositoryProvider.overrideWithValue(
           calendarRepository ?? _FakeCalendarRepository(),
+        ),
+        localNotificationServiceProvider.overrideWithValue(
+          // Granted by default so existing flows (opening the create
+          // sheet, etc.) aren't interrupted by the permission-explanation
+          // dialog; permission-specific tests override this explicitly.
+          notificationService ??
+              LocalNotificationService(
+                gateway: FakeNotificationPluginGateway(),
+              ),
         ),
       ],
       child: const MaterialApp(home: RemindersPage()),
@@ -578,6 +592,102 @@ void main() {
         findsOneWidget,
       );
       expect(find.text('Remind me at'), findsNothing);
+    },
+  );
+
+  testWidgets(
+    'shows a non-blocking banner when notification permission is denied',
+    (tester) async {
+      final notificationService = LocalNotificationService(
+        gateway: FakeNotificationPluginGateway(
+          initialStatus: NotificationPermissionStatus.denied,
+        ),
+      );
+      await _pumpRemindersPage(
+        tester,
+        remindersRepository: _FakeRemindersRepository(),
+        notificationService: notificationService,
+      );
+
+      expect(find.textContaining('Notifications are off'), findsOneWidget);
+      // Reminders are still fully usable -- the FAB isn't blocked by this.
+      expect(find.byTooltip('Add reminder'), findsOneWidget);
+    },
+  );
+
+  testWidgets('shows no banner once notification permission is granted', (
+    tester,
+  ) async {
+    await _pumpRemindersPage(
+      tester,
+      remindersRepository: _FakeRemindersRepository(),
+    );
+
+    expect(find.textContaining('Notifications are off'), findsNothing);
+  });
+
+  testWidgets(
+    'shows a contextual explanation before requesting permission the first '
+    'time, when permission is undecided',
+    (tester) async {
+      final gateway = FakeNotificationPluginGateway(
+        initialStatus: NotificationPermissionStatus.notDetermined,
+      );
+      final notificationService = LocalNotificationService(gateway: gateway);
+      final repository = _CreatingRemindersRepository(
+        const [],
+        _pendingReminder(id: 'reminder-created'),
+      );
+      await _pumpRemindersPage(
+        tester,
+        remindersRepository: repository,
+        notificationService: notificationService,
+      );
+
+      await tester.tap(find.byTooltip('Add reminder'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Enable reminder notifications?'), findsOneWidget);
+
+      await tester.tap(find.text('Enable'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('New reminder'), findsOneWidget);
+      expect(
+        await gateway.getPermissionStatus(),
+        NotificationPermissionStatus.granted,
+      );
+    },
+  );
+
+  testWidgets(
+    'does not re-show the permission explanation on a second Add tap once '
+    'a decision was made',
+    (tester) async {
+      final gateway = FakeNotificationPluginGateway(
+        initialStatus: NotificationPermissionStatus.notDetermined,
+      );
+      final notificationService = LocalNotificationService(gateway: gateway);
+      await _pumpRemindersPage(
+        tester,
+        remindersRepository: _FakeRemindersRepository(),
+        notificationService: notificationService,
+      );
+
+      await tester.tap(find.byTooltip('Add reminder'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Not now'));
+      await tester.pumpAndSettle();
+      // Declining still opens the create sheet (permission is independent
+      // of reminder creation); dismiss it by tapping the modal barrier
+      // before trying "Add reminder" again.
+      await tester.tapAt(const Offset(20, 20));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.byTooltip('Add reminder'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('Enable reminder notifications?'), findsNothing);
     },
   );
 }

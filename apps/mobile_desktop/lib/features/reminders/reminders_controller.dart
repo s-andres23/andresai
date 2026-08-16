@@ -1,5 +1,7 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../../core/notifications/local_notification_service.dart';
 import 'create_reminder_input.dart';
 import 'reminder.dart';
 import 'reminders_repository.dart';
@@ -9,20 +11,46 @@ import 'update_reminder_input.dart';
 ///
 /// Exposes loading/data/error via [AsyncValue] so the UI reacts to each
 /// state without manual bookkeeping.
+///
+/// Local notification scheduling is wired in here, always *after* a backend
+/// mutation has already succeeded and `state` has already been updated: a
+/// notification failure must never roll back a successful backend mutation
+/// or destroy the loaded reminder list, so every notification call below
+/// goes through [_notifySafely], which contains the failure to a debug log
+/// rather than letting it propagate out of the mutation method.
 class RemindersController extends AsyncNotifier<List<Reminder>> {
   bool _isCreating = false;
   final Set<String> _pendingReminderIds = {};
 
   @override
-  Future<List<Reminder>> build() {
-    return ref.watch(remindersRepositoryProvider).fetchReminders();
+  Future<List<Reminder>> build() async {
+    final reminders = await ref
+        .watch(remindersRepositoryProvider)
+        .fetchReminders();
+    // Brings this device's local notification schedule back in sync with
+    // what the backend just returned -- covers app restarts, edits made on
+    // another device, and Calendar-relative reminders the backend moved.
+    await _notifySafely(
+      () => ref
+          .read(localNotificationServiceProvider)
+          .reconcilePendingReminders(reminders),
+    );
+    return reminders;
   }
 
   Future<void> refresh() async {
     state = const AsyncValue.loading();
-    state = await AsyncValue.guard(
-      () => ref.read(remindersRepositoryProvider).fetchReminders(),
-    );
+    state = await AsyncValue.guard(() async {
+      final reminders = await ref
+          .read(remindersRepositoryProvider)
+          .fetchReminders();
+      await _notifySafely(
+        () => ref
+            .read(localNotificationServiceProvider)
+            .reconcilePendingReminders(reminders),
+      );
+      return reminders;
+    });
   }
 
   /// Creates a reminder and inserts it into the current list, keeping the
@@ -42,6 +70,11 @@ class RemindersController extends AsyncNotifier<List<Reminder>> {
       final current = List<Reminder>.from(state.value ?? const []);
       _insertSorted(current, created);
       state = AsyncValue.data(current);
+      await _notifySafely(
+        () => ref
+            .read(localNotificationServiceProvider)
+            .scheduleReminder(created),
+      );
     } finally {
       _isCreating = false;
     }
@@ -58,6 +91,11 @@ class RemindersController extends AsyncNotifier<List<Reminder>> {
           ..removeWhere((reminder) => reminder.id == updated.id);
         _insertSorted(current, updated);
         state = AsyncValue.data(current);
+        await _notifySafely(
+          () => ref
+              .read(localNotificationServiceProvider)
+              .rescheduleReminder(updated),
+        );
       });
 
   /// Cancels [reminderId] and replaces it in place in the loaded list.
@@ -73,6 +111,11 @@ class RemindersController extends AsyncNotifier<List<Reminder>> {
           for (final reminder in state.value ?? const [])
             if (reminder.id == updated.id) updated else reminder,
         ]);
+        await _notifySafely(
+          () => ref
+              .read(localNotificationServiceProvider)
+              .cancelReminder(reminderId),
+        );
       });
 
   /// Deletes [reminderId] and removes it from the loaded list.
@@ -83,7 +126,25 @@ class RemindersController extends AsyncNotifier<List<Reminder>> {
           for (final reminder in state.value ?? const [])
             if (reminder.id != reminderId) reminder,
         ]);
+        await _notifySafely(
+          () => ref
+              .read(localNotificationServiceProvider)
+              .cancelReminder(reminderId),
+        );
       });
+
+  /// Runs [action], containing any thrown error to a debug log rather than
+  /// letting it propagate. Local notification delivery is best-effort and
+  /// device-side only, so a failure here must never surface as a backend
+  /// mutation failure, roll back `state`, or replace the loaded reminder
+  /// list with an error view.
+  Future<void> _notifySafely(Future<void> Function() action) async {
+    try {
+      await action();
+    } catch (error) {
+      debugPrint('Local notification update failed: $error');
+    }
+  }
 
   /// Inserts [reminder] into [reminders] at the position matching ascending
   /// `remindAt` order.

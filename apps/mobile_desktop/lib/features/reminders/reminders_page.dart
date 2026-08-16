@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/auth/auth_providers.dart';
+import '../../core/notifications/local_notification_service.dart';
+import '../../core/notifications/notification_permission_state.dart';
 import '../calendar/calendar_controller.dart';
 import '../calendar/calendar_date_format.dart';
 import '../calendar/calendar_event.dart';
@@ -14,12 +16,80 @@ import 'update_reminder_input.dart';
 
 /// Displays the authenticated user's reminders, and lets the user create,
 /// edit, cancel, and delete them.
-class RemindersPage extends ConsumerWidget {
+///
+/// Also owns the V0.1 notification-permission UX: a short contextual
+/// explanation shown once before the OS permission prompt, and a
+/// non-blocking banner when notifications are off. Reminders always save
+/// successfully in the backend regardless of this permission -- it only
+/// affects whether a device-side alert accompanies them.
+class RemindersPage extends ConsumerStatefulWidget {
   const RemindersPage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<RemindersPage> createState() => _RemindersPageState();
+}
+
+class _RemindersPageState extends ConsumerState<RemindersPage> {
+  NotificationPermissionStatus? _permissionStatus;
+  bool _hasShownPermissionExplanation = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _refreshPermissionStatus();
+  }
+
+  Future<void> _refreshPermissionStatus() async {
+    final status = await ref
+        .read(localNotificationServiceProvider)
+        .getPermissionStatus();
+    if (mounted) setState(() => _permissionStatus = status);
+  }
+
+  /// Shows a short AndresAI explanation before the OS permission prompt,
+  /// the first time the user tries to use reminders while permission is
+  /// undecided. Does nothing (no re-prompt) once a decision -- either way
+  /// -- has already been made, or once this session has already asked.
+  Future<void> _ensurePermissionRequested() async {
+    if (_permissionStatus != NotificationPermissionStatus.notDetermined) {
+      return;
+    }
+    if (_hasShownPermissionExplanation) return;
+    _hasShownPermissionExplanation = true;
+
+    final shouldRequest = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Enable reminder notifications?'),
+        content: const Text(
+          'AndresAI can alert you on this device when a reminder is due. '
+          'You can turn this off later in system settings.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Not now'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Enable'),
+          ),
+        ],
+      ),
+    );
+
+    if (shouldRequest != true || !mounted) return;
+
+    final status = await ref
+        .read(localNotificationServiceProvider)
+        .requestPermission();
+    if (mounted) setState(() => _permissionStatus = status);
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final remindersState = ref.watch(remindersControllerProvider);
+    final notificationService = ref.read(localNotificationServiceProvider);
 
     return Scaffold(
       appBar: AppBar(
@@ -32,24 +102,87 @@ class RemindersPage extends ConsumerWidget {
           ),
         ],
       ),
-      body: switch (remindersState) {
-        AsyncData(:final value) => _RemindersList(reminders: value),
-        AsyncError(:final error) => _RemindersErrorView(
-          message: error.toString(),
-          onRetry: () =>
-              ref.read(remindersControllerProvider.notifier).refresh(),
-        ),
-        _ => const Center(child: CircularProgressIndicator()),
-      },
+      body: Column(
+        children: [
+          if (_permissionStatus == NotificationPermissionStatus.denied)
+            _NotificationsDisabledBanner(
+              canOpenSettings: notificationService.canOpenNotificationSettings,
+              onOpenSettings: () async {
+                await notificationService.openNotificationSettings();
+                await _refreshPermissionStatus();
+              },
+            ),
+          Expanded(
+            child: switch (remindersState) {
+              AsyncData(:final value) => _RemindersList(reminders: value),
+              AsyncError(:final error) => _RemindersErrorView(
+                message: error.toString(),
+                onRetry: () =>
+                    ref.read(remindersControllerProvider.notifier).refresh(),
+              ),
+              _ => const Center(child: CircularProgressIndicator()),
+            },
+          ),
+        ],
+      ),
       floatingActionButton: FloatingActionButton(
-        onPressed: () => showModalBottomSheet<void>(
-          context: context,
-          isScrollControlled: true,
-          useSafeArea: true,
-          builder: (_) => const _CreateReminderSheet(),
-        ),
+        onPressed: () async {
+          await _ensurePermissionRequested();
+          if (!context.mounted) return;
+          showModalBottomSheet<void>(
+            context: context,
+            isScrollControlled: true,
+            useSafeArea: true,
+            builder: (_) => const _CreateReminderSheet(),
+          );
+        },
         tooltip: 'Add reminder',
         child: const Icon(Icons.add),
+      ),
+    );
+  }
+}
+
+/// A short, non-blocking banner shown when notification permission has been
+/// denied, so the user understands why reminders won't alert them without
+/// blocking reminder creation/editing itself.
+class _NotificationsDisabledBanner extends StatelessWidget {
+  const _NotificationsDisabledBanner({
+    required this.canOpenSettings,
+    required this.onOpenSettings,
+  });
+
+  final bool canOpenSettings;
+  final VoidCallback onOpenSettings;
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Material(
+      color: colors.errorContainer,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+        child: Row(
+          children: [
+            Icon(
+              Icons.notifications_off_outlined,
+              color: colors.onErrorContainer,
+            ),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Text(
+                "Notifications are off. Reminders still save, but you won't "
+                'get a device alert.',
+                style: TextStyle(color: colors.onErrorContainer),
+              ),
+            ),
+            if (canOpenSettings)
+              TextButton(
+                onPressed: onOpenSettings,
+                child: const Text('Settings'),
+              ),
+          ],
+        ),
       ),
     );
   }
