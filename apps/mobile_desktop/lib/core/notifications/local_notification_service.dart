@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../features/reminders/reminder.dart';
@@ -235,6 +236,87 @@ class LocalNotificationService {
 
   void dispose() {
     _tapController.close();
+  }
+
+  // IDs reserved for debugRunDiagnostics(), well outside the 31-bit range
+  // reminderNotificationId() can ever produce (it masks to 0x7FFFFFFF, but
+  // in practice hashes of real UUIDs land nowhere near these round
+  // values), so a diagnostic run can never collide with a real reminder's
+  // scheduled notification.
+  @visibleForTesting
+  static const debugImmediateNotificationId = 900000001;
+  @visibleForTesting
+  static const debugScheduledNotificationId = 900000002;
+
+  /// Debug-only diagnostic for investigating "reminder created but no
+  /// notification appears" reports. Not called from any production code
+  /// path -- wire it to a temporary debug affordance (e.g. a
+  /// `kDebugMode`-gated button) while diagnosing, per Phase 4.10.1.
+  ///
+  /// Shows an immediate test notification (isolates whether the platform's
+  /// notification pipeline works at all) and schedules a second one
+  /// [testDelay] from now (isolates scheduling/timezone specifically),
+  /// logging every value relevant to the investigation: permission status,
+  /// `remindAt`, `DateTime.now()`, the notification IDs used, and whether
+  /// `pendingNotificationRequests()` reports the scheduled one immediately
+  /// after scheduling it. Actual delivery/on-screen presentation still has
+  /// to be confirmed by a human watching the device -- this only confirms
+  /// what our code did, not what the OS did with it.
+  Future<void> debugRunDiagnostics({
+    Duration testDelay = const Duration(minutes: 2),
+  }) async {
+    if (!kDebugMode) return;
+
+    final status = await getPermissionStatus();
+    debugPrint('[notif-diagnostic] permission status: $status');
+    if (status != NotificationPermissionStatus.granted) {
+      debugPrint(
+        '[notif-diagnostic] aborting: permission is not granted '
+        '(nothing will be scheduled or shown)',
+      );
+      return;
+    }
+
+    debugPrint(
+      '[notif-diagnostic] showing an immediate test notification '
+      '(id=$debugImmediateNotificationId)',
+    );
+    await _gateway.showNow(
+      id: debugImmediateNotificationId,
+      title: 'AndresAI diagnostic (immediate)',
+      body:
+          'If you see this, immediate local notifications work on this '
+          'device.',
+      payload: '',
+    );
+
+    final now = DateTime.now();
+    final remindAtUtc = now.toUtc().add(testDelay);
+    debugPrint(
+      '[notif-diagnostic] scheduling a test notification '
+      '(id=$debugScheduledNotificationId): now=$now remindAtUtc=$remindAtUtc '
+      '(+${testDelay.inSeconds}s)',
+    );
+    await _gateway.scheduleAt(
+      id: debugScheduledNotificationId,
+      title: 'AndresAI diagnostic (scheduled)',
+      body:
+          'If you see this ~${testDelay.inMinutes} min after it was '
+          'created, scheduled local notifications work.',
+      remindAtUtc: remindAtUtc,
+      payload: '',
+      useExactScheduling: await _gateway.canScheduleExactAlarms(),
+    );
+
+    final pending = await _gateway.pendingNotifications();
+    final isPending = pending.any(
+      (request) => request.id == debugScheduledNotificationId,
+    );
+    debugPrint(
+      '[notif-diagnostic] pendingNotifications() reports ${pending.length} '
+      'total request(s); the test schedule (id=$debugScheduledNotificationId) '
+      'is ${isPending ? '' : 'NOT '}present',
+    );
   }
 }
 

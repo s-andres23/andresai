@@ -690,4 +690,33 @@ void main() {
       expect(find.text('Enable reminder notifications?'), findsNothing);
     },
   );
+
+  testWidgets('the debug notification-diagnostics action runs the immediate + '
+      'scheduled test and confirms it via pendingNotifications()', (
+    tester,
+  ) async {
+    final gateway = FakeNotificationPluginGateway();
+    final notificationService = LocalNotificationService(gateway: gateway);
+    await _pumpRemindersPage(
+      tester,
+      remindersRepository: _FakeRemindersRepository(),
+      notificationService: notificationService,
+    );
+
+    await tester.tap(find.byTooltip('Run notification diagnostics'));
+    await tester.pumpAndSettle();
+
+    expect(
+      gateway.showNowCalls,
+      contains(LocalNotificationService.debugImmediateNotificationId),
+    );
+    expect(
+      gateway.scheduled[LocalNotificationService.debugScheduledNotificationId],
+      isNotNull,
+    );
+    expect(
+      find.textContaining('Notification diagnostics sent'),
+      findsOneWidget,
+    );
+  });
 }

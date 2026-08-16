@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
 import 'package:flutter_timezone/flutter_timezone.dart';
 import 'package:timezone/data/latest_all.dart' as tz_data;
@@ -67,6 +68,18 @@ abstract class NotificationPluginGateway {
   Future<void> cancel(int id);
 
   Future<List<ScheduledNotification>> pendingNotifications();
+
+  /// Shows a notification immediately, with no scheduling/timezone
+  /// involved. Diagnostic-only: lets
+  /// `LocalNotificationService.debugRunDiagnostics` isolate whether the
+  /// platform's notification pipeline works at all, separate from
+  /// scheduling/timezone logic. No production reminder flow calls this.
+  Future<void> showNow({
+    required int id,
+    required String title,
+    required String body,
+    required String payload,
+  });
 }
 
 /// The real [NotificationPluginGateway], backed by
@@ -84,6 +97,18 @@ class FlutterLocalNotificationsGateway implements NotificationPluginGateway {
   // These just need to be stable for this app; they carry no other meaning.
   static const _windowsAppUserModelId = 'AndresAI.MobileDesktop';
   static const _windowsGuid = '2e3a9f6c-4b7d-4e8a-9c1f-6a2d8b5e7f3a';
+
+  // A small custom channel (registered in macos/Runner/MainFlutterWindow.swift)
+  // exposing the raw `UNAuthorizationStatus`. flutter_local_notifications'
+  // own `checkPermissions()` only reports a boolean derived from
+  // `authorizationStatus == .authorized`, which can't distinguish "never
+  // asked" (.notDetermined) from "explicitly denied" (.denied) -- both
+  // collapse to `false`, so it's unusable for deciding whether to show
+  // AndresAI's own permission explanation before requesting. See
+  // `_macOSAuthorizationStatus` below.
+  static const _macOSAuthorizationChannel = MethodChannel(
+    'andresai/notification_authorization',
+  );
 
   final FlutterLocalNotificationsPlugin _plugin;
   bool _timeZonesInitialized = false;
@@ -149,8 +174,7 @@ class FlutterLocalNotificationsGateway implements NotificationPluginGateway {
         final options = await _iosPlugin()?.checkPermissions();
         return _statusFromBool(options?.isEnabled);
       case TargetPlatform.macOS:
-        final options = await _macOSPlugin()?.checkPermissions();
-        return _statusFromBool(options?.isEnabled);
+        return _macOSAuthorizationStatus();
       default:
         // Windows toast notifications are governed entirely by OS settings
         // that this plugin doesn't expose a query API for; there's no way
@@ -211,6 +235,20 @@ class FlutterLocalNotificationsGateway implements NotificationPluginGateway {
     }
   }
 
+  static const _notificationDetails = NotificationDetails(
+    android: AndroidNotificationDetails(
+      _channelId,
+      _channelName,
+      channelDescription: _channelDescription,
+      importance: Importance.high,
+      priority: Priority.high,
+      playSound: true,
+    ),
+    iOS: DarwinNotificationDetails(presentAlert: true, presentSound: true),
+    macOS: DarwinNotificationDetails(presentAlert: true, presentSound: true),
+    windows: WindowsNotificationDetails(),
+  );
+
   @override
   Future<void> scheduleAt({
     required int id,
@@ -229,6 +267,14 @@ class FlutterLocalNotificationsGateway implements NotificationPluginGateway {
     // time.
     final scheduledDate = tz.TZDateTime.from(remindAtUtc, tz.local);
 
+    if (kDebugMode) {
+      debugPrint(
+        '[notif-debug] scheduleAt id=$id remindAtUtc=$remindAtUtc '
+        'now=${DateTime.now()} tz.local=${tz.local.name} '
+        'scheduledDate=$scheduledDate exact=$useExactScheduling',
+      );
+    }
+
     await _plugin.zonedSchedule(
       id: id,
       title: title,
@@ -238,22 +284,23 @@ class FlutterLocalNotificationsGateway implements NotificationPluginGateway {
       androidScheduleMode: useExactScheduling
           ? AndroidScheduleMode.exactAllowWhileIdle
           : AndroidScheduleMode.inexactAllowWhileIdle,
-      notificationDetails: const NotificationDetails(
-        android: AndroidNotificationDetails(
-          _channelId,
-          _channelName,
-          channelDescription: _channelDescription,
-          importance: Importance.high,
-          priority: Priority.high,
-          playSound: true,
-        ),
-        iOS: DarwinNotificationDetails(presentAlert: true, presentSound: true),
-        macOS: DarwinNotificationDetails(
-          presentAlert: true,
-          presentSound: true,
-        ),
-        windows: WindowsNotificationDetails(),
-      ),
+      notificationDetails: _notificationDetails,
+    );
+  }
+
+  @override
+  Future<void> showNow({
+    required int id,
+    required String title,
+    required String body,
+    required String payload,
+  }) {
+    return _plugin.show(
+      id: id,
+      title: title,
+      body: body,
+      payload: payload,
+      notificationDetails: _notificationDetails,
     );
   }
 
@@ -283,6 +330,50 @@ class FlutterLocalNotificationsGateway implements NotificationPluginGateway {
       .resolvePlatformSpecificImplementation<
         MacOSFlutterLocalNotificationsPlugin
       >();
+
+  /// Reads the true `UNAuthorizationStatus` via [_macOSAuthorizationChannel]
+  /// so `notDetermined` and `denied` are reported distinctly, instead of
+  /// the plugin's own `checkPermissions()`, which conflates them.
+  Future<NotificationPermissionStatus> _macOSAuthorizationStatus() async {
+    try {
+      final rawStatus = await _macOSAuthorizationChannel.invokeMethod<int>(
+        'getAuthorizationStatus',
+      );
+      return _statusFromMacOSAuthorizationStatus(rawStatus);
+    } on MissingPluginException catch (error) {
+      // The native side isn't wired up (e.g. a stale/unbuilt binary);
+      // this is worth knowing about during development, since it silently
+      // degrades to a less precise (notDetermined-vs-denied-blind) status
+      // rather than crashing.
+      debugPrint(
+        'macOS notification authorization channel unavailable ($error); '
+        'falling back to checkPermissions().',
+      );
+      final options = await _macOSPlugin()?.checkPermissions();
+      return _statusFromBool(options?.isEnabled);
+    }
+  }
+
+  /// Maps Apple's `UNAuthorizationStatus` raw values -- see
+  /// https://developer.apple.com/documentation/usernotifications/unauthorizationstatus
+  /// -- onto [NotificationPermissionStatus]. `.provisional` and `.ephemeral`
+  /// both already permit showing notifications, so both count as granted.
+  NotificationPermissionStatus _statusFromMacOSAuthorizationStatus(
+    int? rawStatus,
+  ) {
+    switch (rawStatus) {
+      case 0: // notDetermined
+        return NotificationPermissionStatus.notDetermined;
+      case 1: // denied
+        return NotificationPermissionStatus.denied;
+      case 2: // authorized
+      case 3: // provisional
+      case 4: // ephemeral
+        return NotificationPermissionStatus.granted;
+      default:
+        return NotificationPermissionStatus.notDetermined;
+    }
+  }
 
   NotificationPermissionStatus _statusFromBool(bool? granted) {
     if (granted == null) return NotificationPermissionStatus.notDetermined;

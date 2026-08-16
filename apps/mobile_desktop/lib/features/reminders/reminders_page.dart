@@ -1,3 +1,4 @@
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -95,6 +96,28 @@ class _RemindersPageState extends ConsumerState<RemindersPage> {
       appBar: AppBar(
         title: const Text('Reminders'),
         actions: [
+          // Debug-only affordance for manually verifying local notification
+          // delivery on-device (see LocalNotificationService.debugRunDiagnostics
+          // doc comment) -- tree-shaken out of release builds entirely, never
+          // a real user-facing feature.
+          if (kDebugMode)
+            IconButton(
+              icon: const Icon(Icons.bug_report_outlined),
+              tooltip: 'Run notification diagnostics',
+              onPressed: () async {
+                final messenger = ScaffoldMessenger.of(context);
+                await notificationService.debugRunDiagnostics();
+                if (!context.mounted) return;
+                messenger.showSnackBar(
+                  const SnackBar(
+                    content: Text(
+                      'Notification diagnostics sent -- check the debug '
+                      'console.',
+                    ),
+                  ),
+                );
+              },
+            ),
           IconButton(
             icon: const Icon(Icons.logout),
             tooltip: 'Sign out',

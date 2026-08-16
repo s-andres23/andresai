@@ -39,9 +39,13 @@ class FakeNotificationPluginGateway implements NotificationPluginGateway {
 
   final Map<int, FakeScheduledNotification> scheduled = {};
   final List<int> cancelCalls = [];
+  final List<int> showNowCalls = [];
   int scheduleCallCount = 0;
   bool initializeCalled = false;
   bool openSettingsCalled = false;
+
+  /// Makes the next (and every subsequent) `showNow` call throw.
+  bool throwOnShowNow = false;
 
   /// When set, a `cancel` call for this specific notification id throws --
   /// every other id's `cancel` call succeeds normally. Lets tests verify
@@ -118,6 +122,17 @@ class FakeNotificationPluginGateway implements NotificationPluginGateway {
       payload: payload,
       useExactScheduling: useExactScheduling,
     );
+  }
+
+  @override
+  Future<void> showNow({
+    required int id,
+    required String title,
+    required String body,
+    required String payload,
+  }) async {
+    if (throwOnShowNow) throw Exception('showNow failed');
+    showNowCalls.add(id);
   }
 
   @override

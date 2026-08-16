@@ -404,4 +404,74 @@ void main() {
       expect(second, isNull);
     });
   });
+
+  group('debugRunDiagnostics', () {
+    test(
+      'when permission is granted, shows an immediate notification, '
+      'schedules one testDelay from now, and confirms it is pending',
+      () async {
+        final gateway = FakeNotificationPluginGateway();
+        final service = LocalNotificationService(gateway: gateway);
+        final before = DateTime.now();
+
+        await service.debugRunDiagnostics(
+          testDelay: const Duration(minutes: 2),
+        );
+
+        expect(
+          gateway.showNowCalls,
+          contains(LocalNotificationService.debugImmediateNotificationId),
+        );
+        final scheduled = gateway
+            .scheduled[LocalNotificationService.debugScheduledNotificationId];
+        expect(scheduled, isNotNull);
+        // remindAtUtc should be ~2 minutes after "now" -- allow generous
+        // slack for test execution time rather than asserting an exact
+        // value.
+        final actualDelay = scheduled!.remindAtUtc.difference(before.toUtc());
+        expect(actualDelay.inSeconds, greaterThan(110));
+        expect(actualDelay.inSeconds, lessThan(130));
+
+        final pending = await gateway.pendingNotifications();
+        expect(
+          pending.any(
+            (request) =>
+                request.id ==
+                LocalNotificationService.debugScheduledNotificationId,
+          ),
+          isTrue,
+        );
+      },
+    );
+
+    test(
+      'when permission is not granted, does nothing (no show, no schedule)',
+      () async {
+        final gateway = FakeNotificationPluginGateway(
+          initialStatus: NotificationPermissionStatus.denied,
+        );
+        final service = LocalNotificationService(gateway: gateway);
+
+        await service.debugRunDiagnostics();
+
+        expect(gateway.showNowCalls, isEmpty);
+        expect(gateway.scheduleCallCount, 0);
+      },
+    );
+
+    test('uses distinct, fixed IDs that never collide with a real reminder '
+        "'s deterministic ID", () {
+      // Both reserved IDs sit far outside the range any real UUID-derived
+      // reminderNotificationId() would plausibly produce for this test
+      // suite's fixture IDs, and are distinct from each other.
+      expect(
+        LocalNotificationService.debugImmediateNotificationId,
+        isNot(equals(LocalNotificationService.debugScheduledNotificationId)),
+      );
+      expect(
+        reminderNotificationId('reminder-1'),
+        isNot(equals(LocalNotificationService.debugImmediateNotificationId)),
+      );
+    });
+  });
 }
